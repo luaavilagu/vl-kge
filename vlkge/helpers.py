@@ -700,6 +700,10 @@ def get_model(model_name, num_entities, num_relations,
         model_kwargs['p_norm'] = p_norm
         model_kwargs['normalize_relations'] = normalize_relations
         model_kwargs['raw_margin'] = margin
+    elif model_name == 'NeuralTransE':
+        model_kwargs['p_norm'] = p_norm
+        model_kwargs['normalize_relations'] = normalize_relations
+        model_kwargs['raw_margin'] = margin
     elif model_name == 'RotatE':
         model_kwargs['raw_margin'] = margin
     # DistMult and ComplEx don't need extra args

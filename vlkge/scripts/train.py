@@ -75,7 +75,7 @@ Examples:
     
     # Model
     parser.add_argument('--model', type=str, default='TransE',
-                       choices=['TransE', 'DistMult', 'ComplEx', 'RotatE'],
+                       choices=['TransE', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE'],
                        help='KGE model (default: TransE)')
     parser.add_argument('--fusion_mode', type=str, default='average',
                        choices=['average', 'concat', 'weighted', 'addition'],
