@@ -704,6 +704,10 @@ def get_model(model_name, num_entities, num_relations,
         model_kwargs['p_norm'] = p_norm
         model_kwargs['normalize_relations'] = normalize_relations
         model_kwargs['raw_margin'] = margin
+    elif model_name == 'MASNeuralTransE':
+        model_kwargs['p_norm'] = p_norm
+        model_kwargs['normalize_relations'] = normalize_relations
+        model_kwargs['raw_margin'] = margin
     elif model_name == 'RotatE':
         model_kwargs['raw_margin'] = margin
     # DistMult and ComplEx don't need extra args
@@ -756,7 +760,7 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
     
     if resume_from is not None:
         print(f"\nResuming training from checkpoint: {resume_from}")
-        import utils
+        from vlkge import utils
         model, optimizer, scheduler, start_epoch, best_val_mrr, additional_info = \
             utils.load_checkpoint(model, resume_from, optimizer, scheduler, device)
         
@@ -896,7 +900,7 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
                 early_stop_counter = 0
                 
                 if save_path:
-                    import utils
+                    from vlkge import utils
                     # Save complete checkpoint with training state
                     additional_info = {
                         'best_val_mrr': best_val_mrr,
