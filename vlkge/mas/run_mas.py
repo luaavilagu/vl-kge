@@ -34,7 +34,7 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
-def parse_args():
+def parse_args(require_candidate=True):
     parser = argparse.ArgumentParser(
         description='VL-KGE Training',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -66,9 +66,9 @@ Examples:
     required=True,
     help="Path to a trained MASNeuralTransE checkpoint",
     )
-    parser.add_argument("--head", type=str, required=True)
-    parser.add_argument("--relation", type=str, required=True)
-    parser.add_argument("--tail", type=str, required=True)
+    parser.add_argument("--head", type=str, required=require_candidate)
+    parser.add_argument("--relation", type=str, required=require_candidate)
+    parser.add_argument("--tail", type=str, required=require_candidate)
     
     # Dataset
     parser.add_argument('--dataset', type=str, default='wn9_img',
@@ -275,12 +275,40 @@ def main():
 
     entity_to_id, relation_to_id = data_loader.get_entities_and_relations()
 
-    # Load features using utils
+    model = load_mas_model(args, entity_to_id, relation_to_id, device)
+
+    adapter = EvidenceAdapter(
+        model=model,
+        entity_to_id=entity_to_id,
+        relation_to_id=relation_to_id,
+        device=device,
+    )
+
+    environment = KnowledgeGraphEnvironment(
+        visual_evidence_model=adapter.score_visual,
+        textual_evidence_model=adapter.score_textual,
+        seed=args.seed,
+    )
+
+    candidate = {
+        "head": args.head,
+        "relation": args.relation,
+        "tail": args.tail,
+    }
+
+    environment.publish_candidate(candidate)
+    environment.step()
+
+    for message in environment.messages:
+        print(message)
+
+
+def load_mas_model(args, entity_to_id, relation_to_id, device):
+    """Rebuild and load the trained MASNeuralTransE checkpoint."""
     print("\nLoading features...")
     visual_features, textual_features, relation_features, visual_entity_to_index, textual_entity_to_index = \
         utils.load_features(args, entity_to_id, relation_to_id)
 
-    # Initialize model
     print("\nInitializing model...")
     model, optimizer, scheduler = helpers.get_model(
         model_name="MASNeuralTransE",
@@ -324,31 +352,7 @@ def main():
 
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
-
-    adapter = EvidenceAdapter(
-        model=model,
-        entity_to_id=entity_to_id,
-        relation_to_id=relation_to_id,
-        device=device,
-    )
-
-    environment = KnowledgeGraphEnvironment(
-        visual_evidence_model=adapter.score_visual,
-        textual_evidence_model=adapter.score_textual,
-        seed=args.seed,
-    )
-
-    candidate = {
-        "head": args.head,
-        "relation": args.relation,
-        "tail": args.tail,
-    }
-
-    environment.publish_candidate(candidate)
-    environment.step()
-
-    for message in environment.messages:
-        print(message)
+    return model
 
 if __name__ == "__main__":
     main()
