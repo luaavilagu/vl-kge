@@ -55,6 +55,27 @@ def load_fusion_weights(weights_path, checkpoint_path):
             "checkpoint_sha256": checkpoint_hash}
 
 
+def create_ga_environment(model, entity_to_id, relation_to_id, device,
+                          seed=42, decision_threshold=None):
+    """Connect an already loaded scorer to the three agents.
+
+    Reuse this for single-candidate inference and full-split evaluation so
+    both entry points execute the same evidence and decision-agent policies.
+    The caller is responsible for loading alpha and freezing model weights.
+    """
+    adapter = EvidenceAdapter(
+        model=model, entity_to_id=entity_to_id,
+        relation_to_id=relation_to_id, device=device,
+    )
+    return KnowledgeGraphEnvironment(
+        visual_evidence_model=adapter.score_visual,
+        textual_evidence_model=adapter.score_textual,
+        score_fusion=adapter.fuse_scores,
+        decision_threshold=decision_threshold,
+        seed=seed,
+    )
+
+
 def build_ga_environment(config_path, checkpoint_path, weights_path, device,
                          seed=42, decision_threshold=None):
     """Load frozen evidence and expose model fusion through the agent adapter.
@@ -70,16 +91,9 @@ def build_ga_environment(config_path, checkpoint_path, weights_path, device,
     weights = load_fusion_weights(weights_path, checkpoint_path)
     model, loader, _ = load_experiment(config_path, checkpoint_path, device)
     model.set_alpha(weights["visual_weight"])
-    adapter = EvidenceAdapter(
-        model=model, entity_to_id=loader.entity_to_id,
-        relation_to_id=loader.relation_to_id, device=device,
-    )
-    environment = KnowledgeGraphEnvironment(
-        visual_evidence_model=adapter.score_visual,
-        textual_evidence_model=adapter.score_textual,
-        score_fusion=adapter.fuse_scores,
-        decision_threshold=decision_threshold,
-        seed=seed,
+    environment = create_ga_environment(
+        model, loader.entity_to_id, loader.relation_to_id, device,
+        seed=seed, decision_threshold=decision_threshold,
     )
     return environment, model, weights
 

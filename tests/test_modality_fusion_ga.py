@@ -28,6 +28,7 @@ from vlkge.ga.modality_fusion_ga import GAConfig, arithmetic_crossover, run_ga
 from vlkge.ga.run_fusion_ga import file_sha256, load_experiment, main as run_search
 from vlkge.models.mas_gatranse import MASGATransE
 from vlkge.mas.run_ga_mas import build_ga_environment
+from vlkge.mas.evaluate_ga_mas import main as evaluate_agents
 from vlkge.scripts.train import main as train_model
 
 
@@ -177,6 +178,33 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(environment.decisor_agent.combined_score,
                                  agent_model(head, relation, tail).item())
                 self.assertEqual(environment.decisor_agent.decision_message, "unclassified")
+                evaluation_arguments = [
+                    "--config", str(config_path), "--checkpoint", str(checkpoint_path),
+                    "--fusion-weights", str(root / "search" / "fusion_weights.json"),
+                    "--no-cuda", "--candidate-batch-size", "2",
+                ]
+                summary = evaluate_agents(evaluation_arguments + ["--output-dir", str(root / "agents_val")])
+                self.assertEqual(summary["split"], "val")
+                self.assertEqual(summary["agent_cycles"], 2)
+                self.assertEqual(summary["metrics"]["queries"], 4)
+                self.assertEqual(summary["metrics"]["MRR"], report["methods"]["ga"]["validation"]["MRR"])
+                self.assertEqual(summary["max_agent_model_score_difference"], 0.)
+                csv_rows = pd.read_csv(root / "agents_val" / "agent_scores.csv")
+                self.assertEqual(len(csv_rows), 2)
+                messages = [json.loads(line) for line in
+                            (root / "agents_val" / "agent_messages.jsonl").read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(len(messages), 2)
+                self.assertTrue(all(len(row["messages"]) == 3 for row in messages))
+                test_summary = evaluate_agents(evaluation_arguments + [
+                    "--split", "test", "--output-dir", str(root / "agents_test"),
+                ])
+                self.assertEqual(test_summary["metrics"]["MRR"], report["methods"]["ga"]["test"]["MRR"])
+                scores_summary = evaluate_agents(evaluation_arguments + [
+                    "--scores-only", "--output-dir", str(root / "agents_scores"),
+                ])
+                self.assertNotIn("metrics", scores_summary)
+                self.assertEqual(scores_summary["agent_cycles"], 2)
+                self.assertEqual(file_sha256(checkpoint_path), original_hash)
                 run_search(arguments + ["--weights", str(report_path), "--output-dir", str(root / "reuse")])
                 reused = json.loads((root / "reuse" / "fusion_result.json").read_text(encoding="utf-8"))
                 self.assertEqual(report["visual_weight"], reused["visual_weight"])

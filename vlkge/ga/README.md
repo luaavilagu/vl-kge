@@ -130,3 +130,31 @@ ANN environment callers keep their previous averaging and threshold defaults.
 The integration checks compare agent scores to model forward scores and
 cached GA ranking scores. This numerical agreement does not constitute a
 full WN9-IMG experiment or validate the starting GA hyperparameters as optimal.
+
+## 5. Run agents on every validation triple
+
+Reuse the checkpoint and selected weights from the completed search:
+
+```bash
+python -m vlkge.mas.evaluate_ga_mas --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_multimodal/seed42.pt --fusion-weights runs/wn9_img/mas_gatranse_multimodal/ga_seed42/fusion_weights.json --output-dir runs/wn9_img/mas_gatranse_multimodal/agents_validation
+```
+
+Validation is the default split. Every observed validation triple passes
+through VisualAgent, TextualAgent, and DecisorAgent, with an agent/model score
+agreement check for every row. Output files are:
+
+- `agent_scores.csv`: each triple, source index, modality scores, fused score,
+  and optional threshold decision.
+- `agent_messages.jsonl`: the three agent messages for each observed triple.
+- `summary.json`: provenance, weights, processed counts, agreement check,
+  filtered MRR/Hits@K and per-relation metrics, plus equal-weight metrics.
+
+Ranking metrics require replacement entity candidates. The evaluator scores
+them with the same frozen model/fusion policy and direction-specific filters
+used during GA search; it does not execute a separate Mesa cycle for every
+corrupted candidate. The summary labels this distinction explicitly.
+Add `--scores-only` to skip candidate ranking and save only observed-triple
+agent outputs. Add `--split test` only for final test evaluation. No new
+training or genetic search occurs. `--max-triples` is only an optional smoke
+limit; omit it to process the full split. Default decisions are unclassified
+unless a separately selected `--decision-threshold` is supplied.
