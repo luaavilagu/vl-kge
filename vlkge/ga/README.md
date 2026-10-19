@@ -159,6 +159,11 @@ python -m vlkge.mas.evaluate_ga_mas --summary runs/wn9_img/mas_gatranse_multimod
 
 Overall metrics use four decimals and per-relation metrics use three,
 matching `evaluate_mas.py`; formatting does not change the metric values.
+By default the report includes two labeled blocks: alpha 0.5 from
+`equal_weight_metrics`, followed by the selected alpha from `metrics`.
+Use `--report equal` or `--report best` to display only one block, or
+`--report both` to request both explicitly. Existing summaries containing
+both metric sets can be displayed without rerunning evaluation.
 
 Ranking metrics require replacement entity candidates. The evaluator scores
 them with the same frozen model/fusion policy and direction-specific filters

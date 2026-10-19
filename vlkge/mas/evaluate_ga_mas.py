@@ -41,6 +41,8 @@ def parse_args(argv=None):
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--summary", help="Print an existing summary.json without repeating evaluation")
+    parser.add_argument("--report", choices=("both", "equal", "best"), default="both",
+                        help="Display equal weights, GA-selected weights, or both (default)")
     parser.add_argument("--config")
     parser.add_argument("--checkpoint")
     parser.add_argument("--fusion-weights")
@@ -67,30 +69,52 @@ def parse_args(argv=None):
     return args
 
 
-def format_results(summary):
-    """Format saved GA metrics like the existing ANN validation report.
+def format_results(summary, report="both"):
+    """Format equal-weight and/or GA-selected metrics like the ANN report.
 
     Print overall MRR/Hits@K with four decimals and named per-relation metrics
     with three decimals, using the same separators and relation-name padding
     as evaluate_mas.py. Values are only formatted, never recalculated. Derive
     Hits@K columns from the saved metrics so old reports need no config file.
+    The default prints two explicitly labeled blocks. If an older summary
+    lacks equal_weight_metrics, state that limitation rather than inventing
+    baseline values. --report equal requires those saved baseline metrics.
     """
     if "metrics" not in summary:
         raise ValueError("This summary has no ranking metrics; evaluate without --scores-only first.")
-    metrics = summary["metrics"]
-    ks = sorted(int(key[5:]) for key in metrics if key.startswith("Hits@"))
+    if report not in ("both", "equal", "best"):
+        raise ValueError("report must be 'both', 'equal', or 'best'.")
     split = "Validation" if summary.get("split", "val") == "val" else "Test"
     relation_names = summary.get("relation_id_to_name", {})
-    lines = [repr(summary.get("model", "MASGATransE")), "", "=" * 80,
-             f"FINAL {split.upper()} RESULTS:", f"  MRR: {metrics['MRR']:.4f}"]
-    lines.extend(f"  Hits@{k}: {metrics[f'Hits@{k}']:.4f}" for k in ks)
-    lines.extend(["=" * 80, "", f"Per-Relation {split} Metrics:", "-" * 80])
-    for relation_id, values in metrics.get("per_relation", {}).items():
-        name = relation_names.get(str(relation_id), f"Relation_{relation_id}")
-        hits = " | ".join(f"Hits@{k}: {values[f'Hits@{k}']:.3f}" for k in ks)
-        lines.append(f"{name:30}: MRR: {values['MRR']:.3f}" + (f" | {hits}" if hits else ""))
-    lines.extend(["-" * 80, "=" * 80])
-    return "\n".join(lines)
+
+    def block(metrics, label):
+        """Render one metric set, retaining the ANN report's number formats."""
+        ks = sorted(int(key[5:]) for key in metrics if key.startswith("Hits@"))
+        lines = [repr(summary.get("model", "MASGATransE")), label, "", "=" * 80,
+                 f"FINAL {split.upper()} RESULTS:", f"  MRR: {metrics['MRR']:.4f}"]
+        lines.extend(f"  Hits@{k}: {metrics[f'Hits@{k}']:.4f}" for k in ks)
+        lines.extend(["=" * 80, "", f"Per-Relation {split} Metrics:", "-" * 80])
+        for relation_id, values in metrics.get("per_relation", {}).items():
+            name = relation_names.get(str(relation_id), f"Relation_{relation_id}")
+            hits = " | ".join(f"Hits@{k}: {values[f'Hits@{k}']:.3f}" for k in ks)
+            lines.append(f"{name:30}: MRR: {values['MRR']:.3f}" + (f" | {hits}" if hits else ""))
+        lines.extend(["-" * 80, "=" * 80])
+        return "\n".join(lines)
+
+    blocks = []
+    if report in ("both", "equal"):
+        if "equal_weight_metrics" in summary:
+            blocks.append(block(summary["equal_weight_metrics"], "Equal-weight fusion (alpha=0.500000)"))
+        elif report == "equal":
+            raise ValueError("This summary has no equal_weight_metrics; rerun split evaluation to calculate them.")
+        else:
+            blocks.append("Equal-weight metrics are not stored in this summary.")
+    if report in ("both", "best"):
+        alpha = summary.get("visual_weight")
+        label = (f"GA-selected fusion (alpha={alpha:.6f})" if alpha is not None else
+                 "GA-selected fusion (alpha not recorded in this summary)")
+        blocks.append(block(summary["metrics"], label))
+    return "\n\n".join(blocks)
 
 
 def run_agent_rows(environment, model, loader, frame, output):
@@ -152,7 +176,7 @@ def main(argv=None):
     if args.summary:
         with open(args.summary, encoding="utf-8") as stream:
             summary = json.load(stream)
-        print(format_results(summary))
+        print(format_results(summary, report=args.report))
         return summary
     utils.set_seed(args.seed)
     device = torch.device("cpu") if args.no_cuda else utils.set_gpu()
@@ -207,7 +231,7 @@ def main(argv=None):
     print(f"Agent cycles: {len(frame)}; visual={alpha:.6f}, textual={1-alpha:.6f}")
     print(f"Results: {output.resolve()}")
     if "metrics" in summary:
-        report = format_results(summary)
+        report = format_results(summary, report=args.report)
         (output / "results.txt").write_text(report + "\n", encoding="utf-8")
         print(report)
     return summary
