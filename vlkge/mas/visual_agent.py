@@ -19,7 +19,7 @@ class VisualAgent(mesa.Agent):
         return self.current_candidate
 
     def reason(self):
-        # delegate visual scoring to a neural model provided by its environment.
+        # Delegate visual scoring to the evidence provider in the environment.
         self.last_visual_score = self.model.visual_evidence_model(
             self.current_candidate
         )

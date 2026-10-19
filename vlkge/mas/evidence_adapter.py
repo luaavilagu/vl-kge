@@ -73,4 +73,16 @@ class EvidenceAdapter():
 
         return float(score.item())
 
+    def fuse_scores(self, visual_score, textual_score):
+        """Adapt scalar agent evidence to MASGATransE's shared fusion policy.
+
+        Model alpha must already be loaded from the GA result. The model
+        returns a scalar tensor; agent messages carry its Python float value.
+        The frozen scorer and no_grad context keep this inference-only.
+        """
+        self.model.eval()
+        with torch.no_grad():
+            score = self.model.fuse_evidence_scores(visual_score, textual_score)
+        return float(score.item())
+
 

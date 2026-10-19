@@ -102,3 +102,31 @@ Each function contains a docstring explaining its role and assumptions.
 Refer to the [DEAP tools](https://deap.readthedocs.io/en/master/api/tools.html)
 and [variation algorithms](https://deap.readthedocs.io/en/master/api/algo.html)
 for the library behavior used here.
+
+## 4. Run the agents with GA-selected fusion
+
+The original `vlkge.mas.run_mas` command still targets MASNeuralTransE.
+Use the dedicated GA agent runner after training and alpha search:
+
+```bash
+python -m vlkge.mas.run_ga_mas --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_multimodal/seed42.pt --fusion-weights runs/wn9_img/mas_gatranse_multimodal/ga_seed42/fusion_weights.json --head n11669921 --relation _hyponym --tail n11992806
+```
+
+The runner verifies that the weights belong to the checkpoint, loads/fixes
+alpha, and runs VisualAgent, TextualAgent, then DecisorAgent. Both evidence
+agents keep their separate modality messages. The decision agent delegates
+aggregation through EvidenceAdapter to the model's `fuse_evidence_scores`
+method, also used by direct `forward()` calls. It therefore uses the selected
+alpha rather than silently reverting to equal weights. There is no GA search
+or relation training during an agent cycle.
+
+Output includes the selected weights, checkpoint fingerprint, raw modality
+scores, and weighted combined score. The default decision is `unclassified`
+because the search optimizes ranking MRR, not a binary probability cutoff.
+If a threshold has been chosen separately on validation data, pass
+`--decision-threshold VALUE` to request accepted/rejected decisions. Existing
+ANN environment callers keep their previous averaging and threshold defaults.
+
+The integration checks compare agent scores to model forward scores and
+cached GA ranking scores. This numerical agreement does not constitute a
+full WN9-IMG experiment or validate the starting GA hyperparameters as optimal.

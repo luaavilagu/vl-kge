@@ -1,7 +1,14 @@
+import math
+
 import mesa
 
 class DecisorAgent(mesa.Agent):
-    """An agent which will make the decisions."""
+    """Combine this candidate's evidence with the environment's fusion policy.
+
+    The GA policy delegates to the frozen MASGATransE model, ensuring that
+    agent aggregation agrees with the scoring model used to select alpha.
+    Binary decisions are optional and require a supplied threshold.
+    """
 
     def __init__(self, model):
         # Pass the parameters to the parent class.
@@ -22,18 +29,39 @@ class DecisorAgent(mesa.Agent):
         return self.current_candidate
 
     def reason(self):
-        # decide whether the predicted link is feasible.
+        """Fuse fresh, matching evidence; optionally compare it to a threshold.
+
+        Clear previous evidence before reading messages so a missing modality
+        cannot reuse a score from a prior candidate. Ignore other candidates'
+        messages. Raw TransE scores are not probabilities; no threshold means
+        the result is explicitly unclassified, with its numeric score intact.
+        """
+        self.textual_message = None
+        self.visual_message = None
         for message in self.model.messages:
+            if message.get("candidate") != self.current_candidate:
+                continue
             if message["type"] == "textual_evidence":
                 self.textual_message = message
             elif message["type"] == "visual_evidence":
                 self.visual_message = message
-            else:
-                print("Unknown message received")
+        if self.visual_message is None or self.textual_message is None:
+            raise ValueError("Both visual and textual evidence are required for the current candidate.")
+        visual = float(self.visual_message["score"])
+        textual = float(self.textual_message["score"])
+        if not math.isfinite(visual) or not math.isfinite(textual):
+            raise ValueError("Evidence scores must be finite.")
+        if self.model.score_fusion is None:
+            self.combined_score = (visual + textual) / 2
+        else:
+            self.combined_score = float(self.model.score_fusion(visual, textual))
+        if not math.isfinite(self.combined_score):
+            raise ValueError("The fused score must be finite.")
 
-        self.combined_score = (self.visual_message["score"] + self.textual_message["score"]) / 2 
-
-        if self.combined_score >= 0.5:
+        threshold = self.model.decision_threshold
+        if threshold is None:
+            self.decision_message = "unclassified"
+        elif self.combined_score >= threshold:
             self.decision_message = "accepted"
         else:
             self.decision_message = "rejected"
@@ -47,7 +75,8 @@ class DecisorAgent(mesa.Agent):
             "decision": self.decision_message,
             "visual_score": self.visual_message["score"],
             "textual_score": self.textual_message["score"],
-            "combined_score": self.combined_score
+            "combined_score": self.combined_score,
+            "decision_threshold": self.model.decision_threshold,
         }
 
         self.model.messages.append(self.last_message)

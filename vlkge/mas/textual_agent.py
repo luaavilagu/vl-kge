@@ -19,7 +19,7 @@ class TextualAgent(mesa.Agent):
         return self.current_candidate
 
     def reason(self):
-        # delegate textual scoring to a neural model provided by its environment.
+        # Delegate textual scoring to the evidence provider in the environment.
         self.last_textual_score = self.model.textual_evidence_model(
             self.current_candidate
         )

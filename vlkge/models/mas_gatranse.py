@@ -202,6 +202,25 @@ class MASGATransE(VLKGEBase):
         with torch.no_grad():
             self.alpha_tensor.fill_(alpha)
 
+    def fuse_evidence_scores(self, visual_score, textual_score):
+        """Use the same alpha fusion for model inference and agent messages.
+
+        Inputs may be score tensors from forward() or scalar numbers from the
+        visual/textual agents. Convert them to the alpha buffer's device and
+        dtype before weighting. Existing tensors retain their gradient path,
+        so this method also supports relation learning during training.
+
+        Sharing this operation prevents the decision agent from silently
+        using equal weights after the GA has selected another alpha.
+        """
+        visual = torch.as_tensor(
+            visual_score, dtype=self.alpha_tensor.dtype, device=self.alpha_tensor.device
+        )
+        textual = torch.as_tensor(
+            textual_score, dtype=self.alpha_tensor.dtype, device=self.alpha_tensor.device
+        )
+        return self.alpha_tensor * visual + (1 - self.alpha_tensor) * textual
+
     def forward(self, head, relation, tail):
         """
         MASGATransE forward pass: score = (alpha) * S_visual + (1 - alpha) * S_textual
@@ -222,4 +241,4 @@ class MASGATransE(VLKGEBase):
         visual_score = self.score_visual_evidence(head, relation, tail)
         textual_score = self.score_textual_evidence(head, relation, tail)
 
-        return (self.alpha_tensor) * visual_score + (1 - self.alpha_tensor) * textual_score
+        return self.fuse_evidence_scores(visual_score, textual_score)

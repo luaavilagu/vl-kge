@@ -27,6 +27,7 @@ from vlkge.ga.evaluation import build_score_cache, directional_filters
 from vlkge.ga.modality_fusion_ga import GAConfig, arithmetic_crossover, run_ga
 from vlkge.ga.run_fusion_ga import file_sha256, load_experiment, main as run_search
 from vlkge.models.mas_gatranse import MASGATransE
+from vlkge.mas.run_ga_mas import build_ga_environment
 from vlkge.scripts.train import main as train_model
 
 
@@ -43,6 +44,16 @@ class EvolutionTests(unittest.TestCase):
         history = [row["best_mrr"] for row in first["history"]]
         self.assertEqual(history, sorted(history))
         self.assertGreaterEqual(first["fitness_requests"], first["unique_evaluations"])
+
+    def test_invalid_ga_configuration_is_rejected(self):
+        """Validation concerns legal settings, not whether defaults are optimal."""
+        for options in (
+            {"population_size": 2}, {"tournament_size": 0},
+            {"elite_size": 30}, {"mutation_probability": float("nan")},
+            {"crossover_probability": 1.1}, {"patience": 0},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                GAConfig(**options)
 
     def test_arithmetic_uses_original_parents_and_stays_bounded(self):
         first, second = [0.2], [0.8]
@@ -155,6 +166,17 @@ class WorkflowTests(unittest.TestCase):
                                  report["ga"]["unique_evaluations"])
                 self.assertAlmostEqual(report["visual_weight"] + report["textual_weight"], 1)
                 self.assertEqual(file_sha256(checkpoint_path), original_hash)
+                environment, agent_model, _ = build_ga_environment(
+                    config_path, checkpoint_path, root / "search" / "fusion_weights.json",
+                    torch.device("cpu"),
+                )
+                environment.publish_candidate({"head": "a", "relation": "r", "tail": "c"})
+                environment.step()
+                adapter = environment.visual_evidence_model.__self__
+                head, relation, tail = adapter.candidate_to_tensors(environment.current_candidate)
+                self.assertEqual(environment.decisor_agent.combined_score,
+                                 agent_model(head, relation, tail).item())
+                self.assertEqual(environment.decisor_agent.decision_message, "unclassified")
                 run_search(arguments + ["--weights", str(report_path), "--output-dir", str(root / "reuse")])
                 reused = json.loads((root / "reuse" / "fusion_result.json").read_text(encoding="utf-8"))
                 self.assertEqual(report["visual_weight"], reused["visual_weight"])
