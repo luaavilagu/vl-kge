@@ -43,7 +43,7 @@ def compute_logistic_loss(positive_scores, negative_scores):
 
 def negative_sampling_uniform(heads, relations, tails, num_entities, num_neg_samples, 
                               filter_map, relation_probs, generator, 
-                              use_bernoulli=False):
+                              use_bernoulli=False, head_filter_map=None):
     """
     Uniform negative sampling with optional Bernoulli corruption strategy.
     Used for WN9-IMG (bidirectional corruption).
@@ -61,7 +61,7 @@ def negative_sampling_uniform(heads, relations, tails, num_entities, num_neg_sam
         
         if corrupt_head_mask[i]:  # Use pre-computed mask
             # Corrupt head
-            valid_heads = filter_map.get((tail, relation), set())
+            valid_heads = (head_filter_map if head_filter_map is not None else filter_map).get((tail, relation), set())
             sampled_heads = set()
             while len(sampled_heads) < num_neg_samples:
                 neg_head = torch.randint(0, num_entities, (1,), generator=generator).item()
@@ -264,7 +264,7 @@ def negative_sampling_per_relation_fast(heads, relations, tails, num_neg_samples
 
 def evaluate_kge(model, dataloader, filter_map, ks=[1, 3, 10], 
                 bidirectional=True, relation_to_valid_tails=None,
-                device=torch.device('cpu')):
+                device=torch.device('cpu'), head_filter_map=None):
     """
     Unified evaluation function for both WN9-IMG and WikiArt.
     
@@ -276,6 +276,8 @@ def evaluate_kge(model, dataloader, filter_map, ks=[1, 3, 10],
         bidirectional: If True, evaluate both (h,r,?) and (?,r,t). If False, only (h,r,?)
         relation_to_valid_tails: If provided, use per-relation candidates (WikiArt style)
         device: Device for computation
+        head_filter_map: Optional separate (tail, relation)->heads map. If
+            omitted, retain the legacy shared filter_map behavior.
     
     Returns:
         overall_mrr, overall_hits_at_k, relation_metrics
@@ -359,7 +361,7 @@ def evaluate_kge(model, dataloader, filter_map, ks=[1, 3, 10],
                     )
                     
                     # Filtered ranking
-                    valid_heads = filter_map.get((tail.item(), relation.item()), set())
+                    valid_heads = (head_filter_map if head_filter_map is not None else filter_map).get((tail.item(), relation.item()), set())
                     for valid_head in valid_heads:
                         if valid_head != head.item():
                             all_scores_head[valid_head] = float('-inf')
@@ -708,6 +710,10 @@ def get_model(model_name, num_entities, num_relations,
         model_kwargs['p_norm'] = p_norm
         model_kwargs['normalize_relations'] = normalize_relations
         model_kwargs['raw_margin'] = margin
+    elif model_name == 'MASGATransE':
+        model_kwargs['p_norm'] = p_norm
+        model_kwargs['normalize_relations'] = normalize_relations
+        model_kwargs['raw_margin'] = margin
     elif model_name == 'RotatE':
         model_kwargs['raw_margin'] = margin
     # DistMult and ComplEx don't need extra args
@@ -744,13 +750,18 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
           top_k=[1, 3, 10], dataset_name='wn9_img', 
           bidirectional_eval=True, device=torch.device('cpu'), save_path=None, 
           generator=None, evaluate_every=1, patience=None,
-          resume_from=None):
+          resume_from=None, checkpoint_config=None, head_filter_map=None,
+          skip_final_test=False):
     """
     Unified training function for all datasets.
     
     Args:
         ... (existing args) ...
         resume_from: Path to checkpoint to resume training from (optional)
+        checkpoint_config: Effective training arguments stored with new GA
+            checkpoints so scoring can be reconstructed and checked later.
+        head_filter_map: Direction-specific known heads for sampling/ranking.
+        skip_final_test: Leave test evaluation to the final fusion experiment.
     """
     
     # ========== Resume Training if Checkpoint Provided ==========
@@ -849,7 +860,8 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
             else:
                 neg_heads, neg_relations, neg_tails = negative_sampling_uniform(
                     heads, relations, tails, model.num_entities, num_neg_samples,
-                    filter_map, relation_probs, generator, use_bernoulli=use_bernoulli
+                    filter_map, relation_probs, generator, use_bernoulli=use_bernoulli,
+                    head_filter_map=head_filter_map
                 )
                 
             neg_scores = model(neg_heads, neg_relations, neg_tails)
@@ -873,14 +885,14 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
                 model, sampled_train_loader, filter_map, ks=top_k,
                 bidirectional=bidirectional_eval,
                 relation_to_valid_tails=relation_to_valid_tails_train,
-                device=device
+                device=device, head_filter_map=head_filter_map
             )
             
             mrr_val, hits_val, rel_metrics_val = evaluate_kge(
                 model, val_loader, filter_map, ks=top_k,
                 bidirectional=bidirectional_eval,
                 relation_to_valid_tails=relation_to_valid_tails_val,
-                device=device
+                device=device, head_filter_map=head_filter_map
             )
             
             if scheduler is not None:
@@ -910,6 +922,14 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
                         'num_neg_samples': num_neg_samples,
                         'batch_size': batch_size,
                     }
+                    if model.__class__.__name__ == 'MASGATransE':
+                        additional_info.update({
+                            'entity_to_id': entity_to_id,
+                            'relation_to_id': relation_to_id,
+                            'training_config': checkpoint_config,
+                            'visual_entity_to_index': model.visual_entity_to_index,
+                            'textual_entity_to_index': model.textual_entity_to_index,
+                        })
                     utils.save_checkpoint(model, optimizer, scheduler, epoch + 1, 
                                         mrr_val, save_path, additional_info)
                     print(f"  → Saved best model to {save_path}")
@@ -925,6 +945,10 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
     # ========== Final Test Evaluation ==========
     print(f"\n{'='*80}")
     print(f"Training completed. Best validation MRR: {best_val_mrr:.4f}")
+
+    if skip_final_test:
+        print("Test evaluation deferred until fusion weights are selected.")
+        return
     
     if save_path:
         print(f"Loading best model from {save_path}...")
@@ -940,7 +964,7 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
             model, test_loader, filter_map, ks=top_k,
             bidirectional=bidirectional_eval,
             relation_to_valid_tails=relation_to_valid_tails_test,
-            device=device
+            device=device, head_filter_map=head_filter_map
         )
         
         print(f"\n{'='*80}")

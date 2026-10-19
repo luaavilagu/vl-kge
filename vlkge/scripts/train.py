@@ -4,6 +4,7 @@ Supports: WN9-IMG, WikiArt-MKG-v1, WikiArt-MKG-v2
 """
 
 import os
+import hashlib
 import argparse
 import sys
 import yaml
@@ -75,7 +76,7 @@ Examples:
     
     # Model
     parser.add_argument('--model', type=str, default='TransE',
-                       choices=['TransE', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE', 'MASNeuralTransE'],
+                       choices=['TransE', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE', 'MASNeuralTransE', 'MASGATransE'],
                        help='KGE model (default: TransE)')
     parser.add_argument('--fusion_mode', type=str, default='average',
                        choices=['average', 'concat', 'weighted', 'addition'],
@@ -170,6 +171,8 @@ Examples:
                        help='Disable CUDA (use CPU only)')
     parser.add_argument('--save_path', type=str, default=None,
                        help='Path to save best model checkpoint')
+    parser.add_argument('--skip_final_test', action='store_true',
+                       help='Reserve test evaluation for after fusion-weight selection')
     
     # Dataset-specific options
     parser.add_argument('--use_per_relation_candidates', action=BooleanOptionalAction, default=False,
@@ -255,6 +258,11 @@ Examples:
 
 def main():
     args = parse_args()
+
+    if args.model == 'MASGATransE':
+        # Persist dataset identity so GA scoring cannot silently use changed data.
+        with open(args.data_path, 'rb') as source:
+            args._data_sha256 = hashlib.sha256(source.read()).hexdigest()
     
     # Set seed
     utils.set_seed(args.seed)
@@ -320,6 +328,13 @@ def main():
     # Compute filter map and relation probs
     print("\nBuilding evaluation mappings...")
     filter_map = data_loader.compute_filter_map()
+    head_filter_map = None
+    if args.model == 'MASGATransE':
+        # Keep the same directional filtering in training and GA evaluation.
+        from vlkge.ga.evaluation import directional_filters
+        filter_map, head_filter_map = directional_filters(
+            data_loader.data[['hid', 'rid', 'tid']].to_numpy()
+        )
     relation_probs = data_loader.compute_relation_probs()
     
     # Create DataLoaders
@@ -448,7 +463,10 @@ def main():
         generator=generator,
         evaluate_every=args.evaluate_every,
         patience=args.patience,
-        resume_from=args.resume_from
+        resume_from=args.resume_from,
+        checkpoint_config=vars(args),
+        head_filter_map=head_filter_map,
+        skip_final_test=args.skip_final_test,
     )
 
 

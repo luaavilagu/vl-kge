@@ -3,3 +3,4 @@ pandas==2.2.2
 torch==2.5.1
 transformers==4.48.1
 lavis==1.0.2
+deap==1.4.3
