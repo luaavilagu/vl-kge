@@ -33,14 +33,17 @@ from vlkge.mas.run_ga_mas import create_ga_environment, load_fusion_weights
 def parse_args(argv=None):
     """Select a full split, saved scorer/weights, and output destination.
 
-    Validation is the default. --max-triples is an explicitly recorded smoke
+    --summary prints a previously saved summary in ANN-style format without
+    loading a checkpoint or rerunning agents. Otherwise the three scorer
+    inputs are required. Validation is the default. --max-triples is a smoke
     limit; omit it for all rows. Candidate chunking bounds scoring intermediates
     while full ranking caches still require CPU memory for every query/entity.
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--fusion-weights", required=True)
+    parser.add_argument("--summary", help="Print an existing summary.json without repeating evaluation")
+    parser.add_argument("--config")
+    parser.add_argument("--checkpoint")
+    parser.add_argument("--fusion-weights")
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--candidate-batch-size", type=int, default=1024)
@@ -50,11 +53,44 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-cuda", action="store_true")
     args = parser.parse_args(argv)
+    if args.summary is None:
+        missing = [flag for flag, value in (
+            ("--config", args.config), ("--checkpoint", args.checkpoint),
+            ("--fusion-weights", args.fusion_weights),
+        ) if not value]
+        if missing:
+            parser.error("Required unless --summary is supplied: " + ", ".join(missing))
     if args.candidate_batch_size < 1 or (args.max_triples is not None and args.max_triples < 1):
         parser.error("Candidate batch size and optional triple limit must be positive.")
     if args.decision_threshold is not None and not math.isfinite(args.decision_threshold):
         parser.error("--decision-threshold must be finite.")
     return args
+
+
+def format_results(summary):
+    """Format saved GA metrics like the existing ANN validation report.
+
+    Print overall MRR/Hits@K with four decimals and named per-relation metrics
+    with three decimals, using the same separators and relation-name padding
+    as evaluate_mas.py. Values are only formatted, never recalculated. Derive
+    Hits@K columns from the saved metrics so old reports need no config file.
+    """
+    if "metrics" not in summary:
+        raise ValueError("This summary has no ranking metrics; evaluate without --scores-only first.")
+    metrics = summary["metrics"]
+    ks = sorted(int(key[5:]) for key in metrics if key.startswith("Hits@"))
+    split = "Validation" if summary.get("split", "val") == "val" else "Test"
+    relation_names = summary.get("relation_id_to_name", {})
+    lines = [repr(summary.get("model", "MASGATransE")), "", "=" * 80,
+             f"FINAL {split.upper()} RESULTS:", f"  MRR: {metrics['MRR']:.4f}"]
+    lines.extend(f"  Hits@{k}: {metrics[f'Hits@{k}']:.4f}" for k in ks)
+    lines.extend(["=" * 80, "", f"Per-Relation {split} Metrics:", "-" * 80])
+    for relation_id, values in metrics.get("per_relation", {}).items():
+        name = relation_names.get(str(relation_id), f"Relation_{relation_id}")
+        hits = " | ".join(f"Hits@{k}: {values[f'Hits@{k}']:.3f}" for k in ks)
+        lines.append(f"{name:30}: MRR: {values['MRR']:.3f}" + (f" | {hits}" if hits else ""))
+    lines.extend(["-" * 80, "=" * 80])
+    return "\n".join(lines)
 
 
 def run_agent_rows(environment, model, loader, frame, output):
@@ -113,6 +149,11 @@ def main(argv=None):
     Test targets are accessed only when --split test is explicitly requested.
     """
     args = parse_args(argv)
+    if args.summary:
+        with open(args.summary, encoding="utf-8") as stream:
+            summary = json.load(stream)
+        print(format_results(summary))
+        return summary
     utils.set_seed(args.seed)
     device = torch.device("cpu") if args.no_cuda else utils.set_gpu()
     weights = load_fusion_weights(args.fusion_weights, args.checkpoint)
@@ -161,15 +202,14 @@ def main(argv=None):
             "equal_weight_metrics": cache.metrics(0.5, ks=config["top_k"]),
             "relation_id_to_name": {str(value): key for key, value in loader.relation_to_id.items()},
         })
-        metrics = summary["metrics"]
-        print(f"{args.split.upper()} MRR: {metrics['MRR']:.6f}")
-        for k in config["top_k"]:
-            print(f"Hits@{k}: {metrics[f'Hits@{k}']:.6f}")
-        print(f"Equal-weight MRR: {summary['equal_weight_metrics']['MRR']:.6f}")
     with (output / "summary.json").open("w", encoding="utf-8") as stream:
         json.dump(summary, stream, indent=2, allow_nan=False)
     print(f"Agent cycles: {len(frame)}; visual={alpha:.6f}, textual={1-alpha:.6f}")
     print(f"Results: {output.resolve()}")
+    if "metrics" in summary:
+        report = format_results(summary)
+        (output / "results.txt").write_text(report + "\n", encoding="utf-8")
+        print(report)
     return summary
 
 

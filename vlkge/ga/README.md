@@ -148,6 +148,17 @@ agreement check for every row. Output files are:
 - `agent_messages.jsonl`: the three agent messages for each observed triple.
 - `summary.json`: provenance, weights, processed counts, agreement check,
   filtered MRR/Hits@K and per-relation metrics, plus equal-weight metrics.
+- `results.txt`: ANN-style overall and named per-relation metric report,
+  also printed at the end of evaluation.
+
+To print an existing summary in that format without repeating evaluation:
+
+```bash
+python -m vlkge.mas.evaluate_ga_mas --summary runs/wn9_img/mas_gatranse_multimodal/agents_validation/summary.json
+```
+
+Overall metrics use four decimals and per-relation metrics use three,
+matching `evaluate_mas.py`; formatting does not change the metric values.
 
 Ranking metrics require replacement entity candidates. The evaluator scores
 them with the same frozen model/fusion policy and direction-specific filters
