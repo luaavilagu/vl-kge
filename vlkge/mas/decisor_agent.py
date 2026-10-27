@@ -14,10 +14,11 @@ class DecisorAgent(mesa.Agent):
         # Pass the parameters to the parent class.
         super().__init__(model)
 
-        self.goal = "Decide whether a candidate link is possible or not based on textual and visual characteristics"
+        self.goal = "Decide whether a candidate link is possible or not based on textual, structural and visual characteristics"
         self.current_candidate = None
         self.textual_message = None
         self.visual_message = None
+        self.structural_message = None
         self.decision_message = None
         self.last_message = None
         self.combined_score = None
@@ -38,6 +39,7 @@ class DecisorAgent(mesa.Agent):
         """
         self.textual_message = None
         self.visual_message = None
+        self.structural_message = None
         for message in self.model.messages:
             if message.get("candidate") != self.current_candidate:
                 continue
@@ -45,16 +47,19 @@ class DecisorAgent(mesa.Agent):
                 self.textual_message = message
             elif message["type"] == "visual_evidence":
                 self.visual_message = message
-        if self.visual_message is None or self.textual_message is None:
-            raise ValueError("Both visual and textual evidence are required for the current candidate.")
+            elif message["type"] == "structural_evidence":
+                self.structural_message = message
+        if self.visual_message is None or self.textual_message is None or self.structural_message is None:
+            raise ValueError("Visual, textual and structural evidence are required for the current candidate.")
         visual = float(self.visual_message["score"])
         textual = float(self.textual_message["score"])
-        if not math.isfinite(visual) or not math.isfinite(textual):
+        structural = float(self.structural_message["score"])
+        if not math.isfinite(visual) or not math.isfinite(textual) or not math.isfinite(structural):
             raise ValueError("Evidence scores must be finite.")
         if self.model.score_fusion is None:
-            self.combined_score = (visual + textual) / 2
+            self.combined_score = (visual + textual + structural) / 3
         else:
-            self.combined_score = float(self.model.score_fusion(visual, textual))
+            self.combined_score = float(self.model.score_fusion(visual, textual, structural))
         if not math.isfinite(self.combined_score):
             raise ValueError("The fused score must be finite.")
 
@@ -75,6 +80,7 @@ class DecisorAgent(mesa.Agent):
             "decision": self.decision_message,
             "visual_score": self.visual_message["score"],
             "textual_score": self.textual_message["score"],
+            "structural_score": self.structural_message["score"],
             "combined_score": self.combined_score,
             "decision_threshold": self.model.decision_threshold,
         }

@@ -10,10 +10,11 @@ from vlkge.models.vlkge import VLKGEBase
 class MASNeuralTransE(VLKGEBase):
     """
     MASNeuralTransE: Neural Translating Embeddings for Modeling Multi-relational Data
-    Scoring function: score = S_visual + S_textual
+    Scoring function: score = S_visual + S_textual + S_structural
         where:
-            S_visual  = margin - ||h_v + r - t_v||_p + (0.1 * Visual_ann)
-            S_textual = margin - ||h_t + r - t_t||_p + (0.1 * Textual_ann) 
+            S_visual  =    margin - ||h_v + r - t_v||_p + (0.1 * Visual_ann)
+            S_textual =    margin - ||h_t + r - t_t||_p + (0.1 * Textual_ann)
+            S_structural = margin - ||h_s + r - t_s||_p + (0.1 * Structural_ann) 
     
     Reference: Bordes et al. "Translating Embeddings for Modeling Multi-relational Data" (NeurIPS 2013)
     """
@@ -90,6 +91,13 @@ class MASNeuralTransE(VLKGEBase):
             nn.Linear(256, 1)
         )   
 
+        # A new NN added to create score for structural characteristics that approximates to TransE
+        self.structural_scorer = nn.Sequential(
+            nn.Linear(3*final_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )      
+
         # Initialize parameters
         self.reset_parameters()        
 
@@ -132,7 +140,13 @@ class MASNeuralTransE(VLKGEBase):
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)
                 nn.init.zeros_(layer.bias)
-    
+
+        # 9. ANN for structural characteristics initialization
+        for layer in self.structural_scorer:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                nn.init.zeros_(layer.bias)
+
     def get_relation_representations(self, relation_ids):
         """Get relation embeddings"""
         rel_emb = self.relation_embeddings(relation_ids)
@@ -196,12 +210,38 @@ class MASNeuralTransE(VLKGEBase):
 
         return textual_ann_score + textual_transe_score
 
+    def score_structural_evidence(self, head, relation, tail):
+        structural_head = self.get_structural_embedding(head)
+        structural_tail = self.get_structural_embedding(tail)
+        relation_emb = self.get_relation_representations(relation)
+
+        structural_head = F.normalize(structural_head, p=2, dim=-1)
+        structural_tail = F.normalize(structural_tail, p=2, dim=-1)
+
+        structural_transe_score = self.raw_margin - torch.norm(
+            structural_head + relation_emb - structural_tail, 
+            p=self.p_norm,
+            dim=-1
+        )
+
+        structural_features = torch.cat(
+            (structural_head, relation_emb, structural_tail),
+            dim=-1
+        )
+
+        structural_ann_score = 0.1 * self.structural_scorer(
+            structural_features
+        ).squeeze(-1)
+
+        return structural_ann_score + structural_transe_score
+
     def forward(self, head, relation, tail):
         """
-        MASNeuralTransE forward pass: score = S_visual + S_textual
+        MASNeuralTransE forward pass: score = S_visual + S_textual + S_structural
         where:
-            S_visual  = margin - ||h_v + r - t_v||_p + (0.1 * Visual_ann)
-            S_textual = margin - ||h_t + r - t_t||_p + (0.1 * Textual_ann) 
+            S_visual     = margin - ||h_v + r - t_v||_p + (0.1 * Visual_ann)
+            S_textual    = margin - ||h_t + r - t_t||_p + (0.1 * Textual_ann) 
+            S_structural = margin - ||h_s + r - t_s||_p + (0.1 * Structural_ann) 
             
         Args:
             head: Head entity IDs (batch_size,)
@@ -214,4 +254,5 @@ class MASNeuralTransE(VLKGEBase):
 
         visual_score = self.score_visual_evidence(head, relation, tail)
         textual_score = self.score_textual_evidence(head, relation, tail)
-        return visual_score + textual_score
+        structural_score = self.score_structural_evidence(head, relation, tail)
+        return visual_score + textual_score + structural_score

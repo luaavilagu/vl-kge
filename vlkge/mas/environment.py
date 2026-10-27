@@ -4,12 +4,13 @@ import mesa
 
 from vlkge.mas.visual_agent import VisualAgent
 from vlkge.mas.textual_agent import TextualAgent
+from vlkge.mas.structural_agent import StructuralAgent
 from vlkge.mas.decisor_agent import DecisorAgent
 
 class KnowledgeGraphEnvironment(mesa.Model):
     """Shared environment for knowledge-graph evidence agents."""
 
-    def __init__(self, visual_evidence_model, textual_evidence_model, seed=42,
+    def __init__(self, visual_evidence_model, textual_evidence_model, structural_evidence_model, seed=42,
                  score_fusion=None, decision_threshold=0.5):
         """Connect evidence providers and an optional decision fusion policy.
 
@@ -35,6 +36,9 @@ class KnowledgeGraphEnvironment(mesa.Model):
         # Method use for the textual agent during reasoning
         self.textual_evidence_model = textual_evidence_model
 
+        # Method use for the structural agent during reasoning
+        self.structural_evidence_model = structural_evidence_model
+
         self.score_fusion = score_fusion
         self.decision_threshold = decision_threshold
                 
@@ -50,6 +54,9 @@ class KnowledgeGraphEnvironment(mesa.Model):
         # Textual agent in the environment
         self.textual_agent = TextualAgent(self)
 
+        # Structural agent in the environment
+        self.structural_agent = StructuralAgent(self)
+
         # Decisor agent in the environment
         self.decisor_agent = DecisorAgent(self)
 
@@ -60,6 +67,7 @@ class KnowledgeGraphEnvironment(mesa.Model):
     def step(self):
         self.visual_agent.step()
         self.textual_agent.step()
+        self.structural_agent.step()
         self.decisor_agent.step()
         return 
 

@@ -73,7 +73,17 @@ class EvidenceAdapter():
 
         return float(score.item())
 
-    def fuse_scores(self, visual_score, textual_score):
+    def score_structural(self, candidate):
+        head, relation, tail = self.candidate_to_tensors(candidate)
+
+        self.model.eval()
+
+        with torch.no_grad():
+            score = self.model.score_structural_evidence(head, relation, tail)
+
+        return float(score.item())
+
+    def fuse_scores(self, visual_score, textual_score, structural_score):
         """Adapt scalar agent evidence to MASGATransE's shared fusion policy.
 
         Model alpha must already be loaded from the GA result. The model
@@ -82,7 +92,7 @@ class EvidenceAdapter():
         """
         self.model.eval()
         with torch.no_grad():
-            score = self.model.fuse_evidence_scores(visual_score, textual_score)
+            score = self.model.fuse_evidence_scores(visual_score, textual_score, structural_score)
         return float(score.item())
 
 

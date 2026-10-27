@@ -287,6 +287,7 @@ def main():
     environment = KnowledgeGraphEnvironment(
         visual_evidence_model=adapter.score_visual,
         textual_evidence_model=adapter.score_textual,
+        structural_evidence_model=adapter.score_structural,
         seed=args.seed,
     )
 
