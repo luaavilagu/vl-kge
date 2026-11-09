@@ -1,8 +1,8 @@
-"""DEAP search for one global visual/textual fusion weight.
+"""DEAP search for global visual, textual, and structural contributions.
 
-An individual is [alpha], decoded as (alpha, 1-alpha). Its fitness is a
-one-element tuple containing validation MRR. The positive DEAP fitness
-weight means maximize MRR; it is not a modality-fusion weight.
+An individual contains three nonnegative weights summing to one, ordered
+visual, textual, structural. There are two independent degrees of freedom.
+Fitness is a one-element tuple containing filtered validation MRR.
 
 This module defines the search without loading datasets or training models.
 Use ``python -m vlkge.ga.run_fusion_ga --help`` for the checkpoint workflow.
@@ -13,6 +13,7 @@ import math
 import random
 
 from deap import algorithms, base, creator, tools
+from vlkge.models.mas_gatranse import MODALITIES, EQUAL_WEIGHTS, validate_weights
 
 
 # DEAP stores generated classes globally. Guards allow notebook/module reloads.
@@ -28,7 +29,7 @@ class GAConfig:
 
     Crossover is attempted per parent pair; mutation is attempted per child.
     They are independent stages, so a child may undergo both. Random reset
-    always replaces the single gene when mutation is invoked. Set patience
+    replaces the entire weight vector when mutation is invoked. Set patience
     to None to disable early stopping. These are defaults, not tuned optima.
     """
 
@@ -48,8 +49,8 @@ class GAConfig:
         for name in ("population_size", "generations", "tournament_size", "elite_size", "seed"):
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"{name} must be an integer.")
-        if self.population_size < 3 or self.generations < 0:
-            raise ValueError("Use at least 3 individuals and nonnegative generations.")
+        if self.population_size < 4 or self.generations < 0:
+            raise ValueError("Use at least 4 individuals and nonnegative generations.")
         if not 1 <= self.elite_size < self.population_size:
             raise ValueError("elite_size must be positive and below population_size.")
         if not 1 <= self.tournament_size <= self.population_size:
@@ -65,55 +66,86 @@ class GAConfig:
             raise ValueError("patience must be a positive integer or None.")
 
 
+def reference_weights():
+    """Seed equal thirds and all three single modalities, including boundaries."""
+    return [EQUAL_WEIGHTS, (1., 0., 0.), (0., 1., 0.), (0., 0., 1.)]
+
+
+def sample_weights(generator=random):
+    """Sample uniformly over the weight triangle (Dirichlet(1,1,1)).
+
+    Divide three independent unit-rate exponential draws by their sum.
+    Python's generator keeps DEAP seeding reproducible. Normalizing three
+    uniform draws instead would not sample this triangle uniformly.
+    """
+    values = [generator.expovariate(1.) for _ in MODALITIES]
+    total = math.fsum(values)
+    return tuple(value / total for value in values) if total else EQUAL_WEIGHTS
+
+
+def named_weights(weights):
+    """Return a validated dictionary in the explicit modality order."""
+    return dict(zip(MODALITIES, validate_weights(weights)))
+
+
 def arithmetic_crossover(first, second):
-    """Mix parental alpha values in place using one uniform coefficient.
+    """Mix complete parental vectors using one shared coefficient.
 
     Save both original genes before writing either child. Convex combinations
     keep both children between their parents and therefore within [0, 1].
     DEAP expects the modified pair to be returned.
     """
-    a, b = first[0], second[0]
+    a, b = tuple(first), tuple(second)
     coefficient = random.random()
-    first[0] = coefficient * a + (1 - coefficient) * b
-    second[0] = (1 - coefficient) * a + coefficient * b
+    first[:] = validate_weights([coefficient * x + (1 - coefficient) * y for x, y in zip(a, b)])
+    second[:] = validate_weights([(1 - coefficient) * x + coefficient * y for x, y in zip(a, b)])
+    return first, second
+
+
+def bounded_sbx_crossover(first, second, eta):
+    """Bound SBX coordinates, then repair each child's sum-to-one constraint.
+
+    Normalize positive totals, using equal thirds for an all-zero child.
+    Per-coordinate bounds alone do not enforce the required vector sum.
+    """
+    tools.cxSimulatedBinaryBounded(first, second, eta=eta, low=0., up=1.)
+    for child in (first, second):
+        total = math.fsum(child)
+        child[:] = [value / total for value in child] if total else EQUAL_WEIGHTS
     return first, second
 
 
 def random_reset_mutation(individual):
-    """Replace alpha with a fresh uniform value, returning a one-item tuple.
+    """Reset the whole vector uniformly on the simplex; return a one-item tuple.
 
     This supplies global exploration even when arithmetic crossover only
     explores between parents. The outer evolution loop controls how often
     mutation is invoked, so no second per-gene probability is necessary.
     """
-    individual[0] = random.uniform(0.0, 1.0)
+    individual[:] = sample_weights()
     return (individual,)
 
 
-def build_toolbox(evaluate_alpha, config):
+def build_toolbox(evaluate_weights, config):
     """Register individual/population creation, evaluation, and operators.
 
-    evaluate_alpha accepts a Python alpha and returns scalar validation MRR.
+    evaluate_weights accepts three normalized weights and returns validation MRR.
     This adapter validates it and wraps it in DEAP's required fitness tuple.
     Tournament selection supplies parents; selBest is reserved for elites.
     """
     toolbox = base.Toolbox()
-    toolbox.register("attr_flt", random.uniform, 0.0, 1.0)
-    toolbox.register("individual", tools.initRepeat, creator.FusionIndividual, toolbox.attr_flt, n=1)
+    toolbox.register("individual", tools.initIterate, creator.FusionIndividual, sample_weights)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("select", tools.selTournament, tournsize=config.tournament_size)
     if config.crossover == "arithmetic":
         toolbox.register("mate", arithmetic_crossover)
     else:
-        toolbox.register("mate", tools.cxSimulatedBinaryBounded,
-                         eta=config.sbx_eta, low=0.0, up=1.0)
+        toolbox.register("mate", bounded_sbx_crossover, eta=config.sbx_eta)
     toolbox.register("mutate", random_reset_mutation)
 
     def evaluate(individual):
-        """Validate the single bounded gene and convert MRR to DEAP fitness."""
-        if len(individual) != 1 or not 0 <= individual[0] <= 1:
-            raise ValueError("An individual must contain one alpha in [0, 1].")
-        mrr = float(evaluate_alpha(float(individual[0])))
+        """Validate the vector and convert scalar MRR to DEAP fitness."""
+        mrr = float(evaluate_weights(validate_weights(individual)))
         if not math.isfinite(mrr) or not 0 <= mrr <= 1:
             raise ValueError("The evaluator must return finite MRR in [0, 1].")
         return (mrr,)
@@ -122,16 +154,16 @@ def build_toolbox(evaluate_alpha, config):
     return toolbox
 
 
-def run_ga(evaluate_alpha, config=None, progress=None):
-    """Evolve alpha with explicit elite preservation and cached fitness.
+def run_ga(evaluate_weights, config=None, progress=None):
+    """Evolve normalized contributions with elitism and cached fitness.
 
-    The initial population includes alpha 0, 0.5, and 1. The remaining
-    individuals are uniform draws. Each generation copies the best elites
+    The initial population includes equal thirds and three single modalities.
+    Remaining individuals are uniform simplex draws. Each generation copies the best elites
     unchanged and fills other positions using tournament-selected parents.
     DEAP varAnd clones parents and invalidates fitness after variation.
 
     HallOfFame records the best-ever individual; copying elites separately
-    guarantees survival in the actual population. Repeated alpha values reuse
+    guarantees survival in the actual population. Repeated weight vectors reuse
     cached fitness. The result distinguishes fitness requests from unique
     evaluations so random/grid-search budgets can be compared honestly.
 
@@ -145,21 +177,22 @@ def run_ga(evaluate_alpha, config=None, progress=None):
     memo = {}
     requests = 0
 
-    def memoized_evaluate(alpha):
+    def memoized_evaluate(weights):
         """Avoid calculating the same deterministic fitness more than once."""
         nonlocal requests
         requests += 1
-        if alpha not in memo:
-            value = float(evaluate_alpha(alpha))
+        key = validate_weights(weights)
+        if key not in memo:
+            value = float(evaluate_weights(key))
             if not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("The evaluator must return finite MRR in [0, 1].")
-            memo[alpha] = value
-        return memo[alpha]
+            memo[key] = value
+        return memo[key]
 
     try:
         toolbox = build_toolbox(memoized_evaluate, config)
-        population = toolbox.population(n=config.population_size - 3)
-        population.extend(creator.FusionIndividual([a]) for a in (0.0, 0.5, 1.0))
+        population = [creator.FusionIndividual(w) for w in reference_weights()]
+        population.extend(toolbox.population(n=config.population_size - 4))
         hall = tools.HallOfFame(1)
         history = []
 
@@ -170,14 +203,14 @@ def run_ga(evaluate_alpha, config=None, progress=None):
                     individual.fitness.values = toolbox.evaluate(individual)
 
         def record(generation):
-            """Record fitness, alpha diversity, and cumulative evaluation counts."""
+            """Record fitness, vector diversity, and cumulative evaluation counts."""
             values = [individual.fitness.values[0] for individual in population]
             row = {
                 "generation": generation,
                 "best_mrr": hall[0].fitness.values[0],
                 "mean_mrr": sum(values) / len(values),
-                "best_alpha": float(hall[0][0]),
-                "unique_alphas": len({float(ind[0]) for ind in population}),
+                **{f"best_{name}_weight": value for name, value in named_weights(hall[0]).items()},
+                "unique_weights": len({tuple(ind) for ind in population}),
                 "fitness_requests": requests,
                 "unique_evaluations": len(memo),
             }
@@ -207,7 +240,7 @@ def run_ga(evaluate_alpha, config=None, progress=None):
                 break
 
         return {
-            "best_alpha": float(hall[0][0]),
+            "best_weights": named_weights(hall[0]),
             "best_mrr": float(hall[0].fitness.values[0]),
             "config": asdict(config),
             "history": history,

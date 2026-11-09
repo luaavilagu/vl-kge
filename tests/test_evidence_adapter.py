@@ -21,6 +21,13 @@ class FakeEvidenceModel:
     def score_textual_evidence(self, head, relation, tail):
         return (3 * head + relation + tail).float()
 
+    def score_structural_evidence(self, head, relation, tail):
+        return (head + relation + tail).float()
+
+    def fuse_evidence_scores(self, visual, textual, structural):
+        """Return a known weighted result to verify adapter argument order."""
+        return torch.as_tensor(0.2 * visual + 0.3 * textual + 0.5 * structural)
+
 
 class EvidenceAdapterTest(unittest.TestCase):
     def setUp(self):
@@ -49,7 +56,11 @@ class EvidenceAdapterTest(unittest.TestCase):
     def test_returns_visual_and_textual_scores(self):
         self.assertEqual(self.adapter.score_visual(self.candidate), 33.0)
         self.assertEqual(self.adapter.score_textual(self.candidate), 18.0)
+        self.assertEqual(self.adapter.score_structural(self.candidate), 14.0)
         self.assertTrue(self.model.in_evaluation_mode)
+
+    def test_three_score_fusion_preserves_modality_order(self):
+        self.assertEqual(self.adapter.fuse_scores(10., 20., 30.), 23.)
 
     def test_rejects_unknown_entities(self):
         invalid_candidate = {**self.candidate, "head": "unknown_entity"}

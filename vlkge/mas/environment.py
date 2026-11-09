@@ -14,15 +14,15 @@ class KnowledgeGraphEnvironment(mesa.Model):
                  score_fusion=None, decision_threshold=0.5):
         """Connect evidence providers and an optional decision fusion policy.
 
-        score_fusion accepts visual/textual scalar scores and returns a fused
+        score_fusion accepts visual/textual/structural scores and returns a fused
         score. MASGATransE supplies its trained model's GA-weighted policy.
-        Omitting it preserves the original equal-weight policy for ANN runs.
+        Omitting it uses equal thirds for the three evidence agents.
 
         decision_threshold=None reports a score without claiming a binary
         classification. A finite explicit threshold enables accepted/rejected
-        output. The legacy default remains 0.5 for existing callers; the GA
-        runner explicitly chooses None because MRR does not calibrate a
-        classification threshold.
+        output. The default remains 0.5 for the ANN-style decision test. This
+        threshold does not participate in GA ranking fitness. Each cycle runs
+        three evidence agents followed by the decision agent (four messages).
         """
         if score_fusion is not None and not callable(score_fusion):
             raise TypeError("score_fusion must be callable or None.")

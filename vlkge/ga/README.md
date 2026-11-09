@@ -1,176 +1,184 @@
-# Modality-fusion GA for TransE
+# Three-modality GA fusion for TransE
 
-The experiment has two stages. First, train `MASGATransE` once using equal
-visual/textual weights to learn relation translations. Then freeze that
-checkpoint and use DEAP to maximize filtered validation MRR by evolving one
-global visual weight, alpha. The textual weight is always `1-alpha`.
-There are no ANN scoring layers and no relation updates during GA search.
+Train a scoring model once, freeze it, then use DEAP to learn the relative
+contributions of visual, textual, and structural evidence. There are no ANN
+scoring heads and no relation/embedding updates during the genetic search.
 
-## 1. Train the scoring model
+## Model and weights
 
-Run from the repository root in an environment with the project dependencies
-and DEAP installed (`python -m pip install deap==1.4.3` if needed).
+The fixed modality order is **visual, textual, structural**. An individual
+contains three nonnegative weights summing to one, with two independent
+degrees of freedom:
 
-```bash
-python -m vlkge.scripts.train --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml
-```
+`score = w_visual * S_visual + w_textual * S_textual + w_structural * S_structural`
 
-The configuration saves the best validation checkpoint to
-`runs/wn9_img/mas_gatranse_multimodal/seed42.pt`. Alpha remains 0.5 during
-training. Test evaluation is deferred until weight selection is complete.
-The checkpoint includes model settings, dataset fingerprint, entity/relation
-IDs, and feature-row mappings; the GA loader verifies these before inference.
-Use this updated trainer rather than an older checkpoint without that metadata.
+Each modality score is margin minus its TransE translation distance.
+Structural entity embeddings and shared relation vectors learn during the
+initial training stage; supplied visual/textual feature tables stay frozen.
+The initial fusion is equal thirds. Model `modality_weights` is a buffer,
+saved in state_dict and excluded from gradient optimization. `set_weights`
+updates it in place, and `fuse_evidence_scores` is shared with the agents.
 
-## 2. Evolve alpha
+## 1. Train with the existing base configuration
 
-```bash
-python -m vlkge.ga.run_fusion_ga --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_multimodal/seed42.pt --output-dir runs/wn9_img/mas_gatranse_multimodal/ga_seed42
-```
-
-Defaults: population 30 (27 random plus alpha 0, 0.5, 1), tournament size 3,
-arithmetic crossover probability 0.8, random-reset mutation probability 0.2,
-2 unchanged elites, at most 30 generations, and early stopping after 10
-generations without improved validation MRR. Use `--patience 0` to disable
-early stopping. These settings are starting values, not tuned optima.
-
-Use `--crossover sbx --sbx-eta 20` to compare bounded simulated binary
-crossover. Both alternatives preserve alpha in [0, 1]. Mutation resets the
-single gene uniformly in [0, 1]. Crossover and mutation are independent.
-DEAP clones parents and invalidates changed fitness; unchanged elites retain
-their fitness. HallOfFame separately records the best-ever individual.
-
-The search caches visual/textual scores on CPU, then evaluates each genome
-without further model forwards. Full split caches consume RAM proportional
-to queries times entity candidates. `--candidate-batch-size` bounds temporary
-model scoring tensors, not the final cache. Optional `--max-validation-triples`
-and `--max-test-triples` support smoke runs; reports record these limits.
-
-## 3. Compare and evaluate
-
-Every search reports visual-only, textual-only, equal-weight, random-search,
-and grid-search validation metrics. Random search has the same number of
-fitness evaluations as the GA's unique evaluated alphas. The grid uses the
-same count unless `--grid-points` explicitly changes it. Fitness requests and
-unique evaluations are both recorded because unchanged/duplicate genomes
-reuse fitness. Fixed baselines are reported separately from search budgets.
-
-To add final test results after validation-based selection, append
-`--evaluate-test` to the search command. Or reuse a saved full search report:
+Run from the repository root. No additional YAML configuration is created.
+CLI arguments override the base YAML; the checkpoint stores the effective
+arguments, dataset fingerprint, entity/relation IDs, and feature-row mappings.
 
 ```bash
-python -m vlkge.ga.run_fusion_ga --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_multimodal/seed42.pt --weights runs/wn9_img/mas_gatranse_multimodal/ga_seed42/fusion_result.json --evaluate-test --output-dir runs/wn9_img/mas_gatranse_multimodal/final_seed42
+mkdir -p runs/wn9_img/mas_gatranse_3modalities
+
+nohup python -m vlkge.scripts.train \
+  --config vlkge/configs/wn9_img/transe_clip.yaml \
+  --model MASGATransE \
+  --fusion_mode average \
+  --use_structural \
+  --use_visual \
+  --use_textual \
+  --seed 42 \
+  --skip_final_test \
+  --save_path runs/wn9_img/mas_gatranse_3modalities/mas_gatranse_average_3modalities_seed42.pt \
+  > runs/wn9_img/mas_gatranse_3modalities/nohup.out 2>&1 &
 ```
 
-`--weights` skips evolution for the saved GA alpha; baseline searches are
-recomputed using the saved GA evaluation budget. The loader requires the
-original validation subset and evaluation direction; if a subset was sampled,
-reuse its sampling seed as well.
-Repeat with additional `--seed` values and separate output directories to
-measure search variability. Choose configurations using validation data;
-test performance must not feed back into operator or weight selection.
+The existing training helper learns structural entities and relations with
+equal thirds. `--skip_final_test` reserves final test metrics for after fusion
+selection. A new checkpoint is required: old two-modality checkpoints do not
+contain the trained structural table or the new weight-buffer schema.
+The existing two-modality YAML and experiment files are left unchanged.
 
-Output files:
+The GA loader uses effective arguments from the checkpoint, so
+`model: TransE` in the base YAML does not undo `--model MASGATransE`.
+Existing saved data/feature paths are preferred; when those paths are missing
+after moving a checkpoint, the supplied base YAML provides fallback locations.
+Dataset hashes and feature/vocabulary ordering must still match.
 
-- `fusion_result.json`: settings, provenance, history, weights, and metrics.
-- `fusion_weights.json`: checkpoint reference and selected modality weights.
-- `history.csv`: per-generation best/mean MRR, alpha diversity, evaluation counts.
-
-The original checkpoint is unchanged. Load it and call `set_alpha` with the
-saved visual weight to reproduce the fused scorer. The GA finds the best
-weight it encounters, not a guaranteed global optimum.
-
-## Evaluation rules
-
-All entities are candidates. Head and tail queries have separate all-known
-filter maps; other known true answers are excluded and each query's own
-target is retained. Ties use ascending entity ID, equivalent to stable sorting
-scores over ascending entity candidates. The dedicated GA training path uses
-the same directional maps. Older model paths keep their prior filtering.
-Report MRR, Hits@1/3/10, and per-relation metrics. No binary probability
-threshold is applied to raw TransE scores.
-
-## Code guide
-
-- `modality_fusion_ga.py`: DEAP types, operators, population, elitist evolution.
-- `evaluation.py`: direction-specific filtering, fixed score cache, metrics,
-  and baseline comparisons.
-- `run_fusion_ga.py`: configuration/checkpoint loading, freezing, CLI, reports.
-- `../models/mas_gatranse.py`: differentiable scoring model and alpha buffer.
-
-Each function contains a docstring explaining its role and assumptions.
-Refer to the [DEAP tools](https://deap.readthedocs.io/en/master/api/tools.html)
-and [variation algorithms](https://deap.readthedocs.io/en/master/api/algo.html)
-for the library behavior used here.
-
-## 4. Run the agents with GA-selected fusion
-
-The original `vlkge.mas.run_mas` command still targets MASNeuralTransE.
-Use the dedicated GA agent runner after training and alpha search:
+## 2. Evolve the relative contributions
 
 ```bash
-python -m vlkge.mas.run_ga_mas --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_multimodal/seed42.pt --fusion-weights runs/wn9_img/mas_gatranse_multimodal/ga_seed42/fusion_weights.json --head n11669921 --relation _hyponym --tail n11992806
+python -m vlkge.ga.run_fusion_ga \
+  --config vlkge/configs/wn9_img/transe_clip.yaml \
+  --checkpoint runs/wn9_img/mas_gatranse_3modalities/mas_gatranse_average_3modalities_seed42.pt \
+  --output-dir runs/wn9_img/mas_gatranse_3modalities/ga_seed42
 ```
 
-The runner verifies that the weights belong to the checkpoint, loads/fixes
-alpha, and runs VisualAgent, TextualAgent, then DecisorAgent. Both evidence
-agents keep their separate modality messages. The decision agent delegates
-aggregation through EvidenceAdapter to the model's `fuse_evidence_scores`
-method, also used by direct `forward()` calls. It therefore uses the selected
-alpha rather than silently reverting to equal weights. There is no GA search
-or relation training during an agent cycle.
+Starting settings: population 30, tournament size 3, arithmetic crossover
+probability 0.8, random-reset mutation probability 0.2, 2 unchanged elites,
+maximum 30 generations, and early stopping after 10 generations without
+improved MRR. These defaults have not been tuned. Use `--patience 0` to run
+the full generation limit, and repeat with separate `--seed`/output paths.
 
-Output includes the selected weights, checkpoint fingerprint, raw modality
-scores, and weighted combined score. The default decision is `unclassified`
-because the search optimizes ranking MRR, not a binary probability cutoff.
-If a threshold has been chosen separately on validation data, pass
-`--decision-threshold VALUE` to request accepted/rejected decisions. Existing
-ANN environment callers keep their previous averaging and threshold defaults.
+The initial population contains equal thirds and the three single-modality
+vertices, plus 26 random vectors. Random initialization and reset mutation
+sample uniformly over the valid weight triangle (Dirichlet(1,1,1)).
+Arithmetic crossover uses one coefficient for the whole vector, preserving
+its sum. Optional `--crossover sbx --sbx-eta 20` bounds coordinates and repairs
+the resulting sum. Crossover and mutation are independent stages.
+DEAP clones parents and invalidates changed fitness; explicit elite copying
+and HallOfFame preserve the best fitness encountered.
 
-The integration checks compare agent scores to model forward scores and
-cached GA ranking scores. This numerical agreement does not constitute a
-full WN9-IMG experiment or validate the starting GA hyperparameters as optimal.
+Scores are cached in visual/textual/structural order. Each genome recombines
+those fixed scores; no model forwards or parameter training occur per genome.
+The score tensor uses 50% more storage than the previous two-channel cache.
+`--candidate-batch-size` bounds scoring intermediates, not the full CPU cache.
+Optional `--max-validation-triples` and `--max-test-triples` are recorded smoke
+limits; omit them for full evaluation.
 
-## 5. Run agents on every validation triple
+## 3. Comparisons, provenance, and test evaluation
 
-Reuse the checkpoint and selected weights from the completed search:
+Report equal thirds, visual-only, textual-only, structural-only, random
+search, and simplex-grid search. Random search includes the same four
+references and matches the GA's unique fitness-evaluation budget.
+A grid uses the largest complete triangular lattice within that budget or
+`--grid-points`; its actual count is reported and may be smaller than the cap.
+For example, `--grid-points 231` evaluates a lattice with 0.05 increments.
+Equal thirds is also reported separately, even if absent from the lattice.
+
+Candidate filtering is directional. GA/agent validation ranking uses known
+training + validation triples, retaining the current target; final test uses
+training + validation + test triples. All entities are candidates, with stable
+entity-ID tie breaking. Recompute comparison baselines under this protocol.
+The existing training helper's checkpoint-selection evaluation still uses
+its pre-existing all-known filters; its logged MRR and older ANN/GA metrics
+may therefore differ from freshly recomputed validation metrics.
+
+Use `--evaluate-test` after selecting the search configuration on validation.
+To reuse an existing selected vector without repeating evolution, pass
+`--weights PATH_TO_FUSION_RESULT_JSON`. Reuse the original direction/subset
+and sampling seed. Baseline searches are recomputed with the saved budget.
+
+Outputs:
+- `fusion_result.json`: version 2, modality order, named weights, provenance,
+  search configuration/history, and comparison metrics.
+- `fusion_weights.json`: small versioned weights file tied to its checkpoint.
+- `history.csv`: best/mean MRR, each best modality weight, vector diversity,
+  fitness requests, and unique evaluations.
+
+Old two-modality checkpoints/weight files are rejected clearly. Archived
+summary JSON files can still be displayed by the report formatter.
+
+## 4. Run the four agents for one triple
 
 ```bash
-python -m vlkge.mas.evaluate_ga_mas --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_multimodal/seed42.pt --fusion-weights runs/wn9_img/mas_gatranse_multimodal/ga_seed42/fusion_weights.json --output-dir runs/wn9_img/mas_gatranse_multimodal/agents_validation
+python -m vlkge.mas.run_ga_mas \
+  --config vlkge/configs/wn9_img/transe_clip.yaml \
+  --checkpoint runs/wn9_img/mas_gatranse_3modalities/mas_gatranse_average_3modalities_seed42.pt \
+  --fusion-weights runs/wn9_img/mas_gatranse_3modalities/ga_seed42/fusion_weights.json \
+  --head n11669921 --relation _hyponym --tail n11992806
 ```
 
-Validation is the default split. Every observed validation triple passes
-through VisualAgent, TextualAgent, and DecisorAgent, with an agent/model score
-agreement check for every row. Output files are:
+VisualAgent, TextualAgent, and StructuralAgent emit separate evidence.
+DecisorAgent delegates to the same weighted fusion as model forward().
+The decision threshold defaults to 0.5 for the requested ANN-style test;
+accepted/rejected output does not affect MRR or weight selection.
 
-- `agent_scores.csv`: each triple, source index, modality scores, fused score,
-  and optional threshold decision.
-- `agent_messages.jsonl`: the three agent messages for each observed triple.
-- `summary.json`: provenance, weights, processed counts, agreement check,
-  filtered MRR/Hits@K and per-relation metrics, plus equal-weight metrics.
-- `results.txt`: ANN-style overall and named per-relation metric report,
-  also printed at the end of evaluation.
-
-To print an existing summary in that format without repeating evaluation:
+## 5. Evaluate agents on every validation triple
 
 ```bash
-python -m vlkge.mas.evaluate_ga_mas --summary runs/wn9_img/mas_gatranse_multimodal/agents_validation/summary.json
+python -m vlkge.mas.evaluate_ga_mas \
+  --config vlkge/configs/wn9_img/transe_clip.yaml \
+  --checkpoint runs/wn9_img/mas_gatranse_3modalities/mas_gatranse_average_3modalities_seed42.pt \
+  --fusion-weights runs/wn9_img/mas_gatranse_3modalities/ga_seed42/fusion_weights.json \
+  --split val \
+  --output-dir runs/wn9_img/mas_gatranse_3modalities/agents_validation
 ```
 
-Overall metrics use four decimals and per-relation metrics use three,
-matching `evaluate_mas.py`; formatting does not change the metric values.
-By default the report includes two labeled blocks: alpha 0.5 from
-`equal_weight_metrics`, followed by the selected alpha from `metrics`.
-Use `--report equal` or `--report best` to display only one block, or
-`--report both` to request both explicitly. Existing summaries containing
-both metric sets can be displayed without rerunning evaluation.
+Each observed triple executes four agents and checks the combined score
+against direct inference. Ranking uses cached replacement-candidate model
+scores with the same shared fusion, rather than millions of Mesa cycles.
 
-Ranking metrics require replacement entity candidates. The evaluator scores
-them with the same frozen model/fusion policy and direction-specific filters
-used during GA search; it does not execute a separate Mesa cycle for every
-corrupted candidate. The summary labels this distinction explicitly.
-Add `--scores-only` to skip candidate ranking and save only observed-triple
-agent outputs. Add `--split test` only for final test evaluation. No new
-training or genetic search occurs. `--max-triples` is only an optional smoke
-limit; omit it to process the full split. Default decisions are unclassified
-unless a separately selected `--decision-threshold` is supplied.
+Outputs:
+- `agent_scores.csv`: all three evidence scores, combined score, and decision.
+- `agent_messages.jsonl`: four messages per observed triple.
+- `summary.json`: named weights, effective buffer values, metadata, parity
+  check, MRR/Hits@K, and equal-thirds comparison.
+- `results.txt`: ANN-style overall and named per-relation reports.
+
+Use `--scores-only` to skip ranking, `--split test` for final test evaluation,
+and omit `--max-triples` to process the full split. Display saved metrics:
+
+```bash
+python -m vlkge.mas.evaluate_ga_mas \
+  --summary runs/wn9_img/mas_gatranse_3modalities/agents_validation/summary.json \
+  --report both
+```
+
+The two report blocks show equal thirds and the selected three-weight vector.
+`--report equal` or `--report best` selects one block. Formatting preserves
+four decimals overall and three decimals per relation without recomputation.
+
+## Code and checks
+
+`modality_fusion_ga.py` owns DEAP/operators; `evaluation.py` owns cached
+ranking and baselines; `run_fusion_ga.py` owns checkpoint/CLI/report handling.
+The model and agent adapter share the actual fusion operation. Functions
+contain docstrings explaining invariants and assumptions.
+
+```bash
+python check_mas_gatranse.py
+python -m unittest discover -s tests -v
+```
+
+The suite includes structural gradients, invalid weights, seeded operators,
+agent/cache/model agreement, CLI-overridden training, metadata checks, and a
+tiny end-to-end workflow. It is not a full WN9-IMG performance benchmark.

@@ -1,7 +1,7 @@
 """Cache frozen modality scores and evaluate filtered link-prediction ranks.
 
-The cache contains scores, not embeddings. Changing alpha only recombines
-two numbers per candidate, avoiding a model forward pass for every genome.
+The cache contains scores, not embeddings. Each weight vector recombines
+three numbers per candidate without retraining or rescoring embeddings.
 Head and tail filters are separate to avoid removing answers to the opposite
 query direction. Equal scores are ordered by ascending entity ID, matching
 a stable descending sort over an ascending candidate list.
@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from vlkge.models.mas_gatranse import MODALITIES, validate_weights
+from vlkge.ga.modality_fusion_ga import reference_weights, sample_weights, named_weights
 
 
 def directional_filters(known_triples):
@@ -29,11 +31,26 @@ def directional_filters(known_triples):
     return tails, heads
 
 
+def known_triples_for_split(loader, split):
+    """Use train+validation positives for search; include test only at final test.
+
+    Keep the full validation set in the filters even for an explicit smoke
+    subset. This changes the old GA all-split validation protocol; recompute
+    comparison baselines under this protocol rather than reuse old numbers.
+    """
+    if split not in ("val", "test"):
+        raise ValueError("split must be 'val' or 'test'.")
+    frame = loader.data
+    if split == "val":
+        frame = frame[frame["mode"].isin(("train", "val"))]
+    return frame[["hid", "rid", "tid"]].to_numpy(dtype=np.int64)
+
+
 @dataclass
 class ScoreCache:
     """Fixed scores and candidate masks for one validation or test split.
 
-    scores has shape (queries, entities, 2), in visual/textual order.
+    scores has shape (queries, entities, 3), ordered visual/textual/structural.
     valid has shape (queries, entities). targets and relations identify each
     query's correct answer and relation. Arrays remain on CPU, while model
     scoring can run on CPU or GPU. Full WN9-IMG caches require RAM; candidate
@@ -47,8 +64,8 @@ class ScoreCache:
 
     def __post_init__(self):
         """Reject malformed or nonfinite caches before optimization begins."""
-        if self.scores.ndim != 3 or self.scores.shape[2] != 2:
-            raise ValueError("scores must have shape (queries, entities, 2).")
+        if self.scores.ndim != 3 or self.scores.shape[2] != 3:
+            raise ValueError("scores must have shape (queries, entities, 3).")
         queries, entities, _ = self.scores.shape
         if not queries or not entities:
             raise ValueError("Cannot evaluate an empty split or candidate set.")
@@ -63,26 +80,25 @@ class ScoreCache:
         if not self.valid[np.arange(queries), self.targets].all():
             raise ValueError("Filtering must retain every query's own target.")
 
-    def metrics(self, alpha, ks=(1, 3, 10), query_batch_size=128):
-        """Return filtered MRR, Hits@K, and per-relation metrics for one alpha.
+    def metrics(self, weights, ks=(1, 3, 10), query_batch_size=128):
+        """Return filtered MRR, Hits@K, and per-relation metrics for one vector.
 
         Blend before applying the Boolean filter. Storing -infinity inside
-        modality scores would cause 0 * -infinity = NaN at alpha 0 or 1.
+        modality scores would cause 0 * -infinity = NaN for single modalities.
         Rank counting is equivalent to stable sorting but avoids sorting all
-        entities. Float32 alpha matches the model's registered alpha buffer.
+        entities. Float32 weights match the model's registered vector buffer.
         Temporary fusion matrices are limited to query_batch_size rows.
         """
-        if not np.isfinite(alpha) or not 0 <= alpha <= 1:
-            raise ValueError("alpha must be finite and in [0, 1].")
+        weights = np.asarray(validate_weights(weights), dtype=np.float32)
         if query_batch_size < 1 or any(type(k) is not int or k < 1 for k in ks):
             raise ValueError("Use positive query batch size and Hits@K values.")
-        alpha = np.float32(alpha)
         candidate_ids = np.arange(self.scores.shape[1])
         ranks = np.empty(len(self.targets), dtype=np.int64)
         for start in range(0, len(ranks), query_batch_size):
             end = min(start + query_batch_size, len(ranks))
             block = self.scores[start:end]
-            combined = alpha * block[:, :, 0] + (np.float32(1) - alpha) * block[:, :, 1]
+            combined = (weights[0] * block[:, :, 0] + weights[1] * block[:, :, 1]
+                        + weights[2] * block[:, :, 2])
             targets = self.targets[start:end]
             gold = combined[np.arange(end - start), targets, None]
             precedes = (combined > gold) | (
@@ -126,11 +142,11 @@ def build_score_cache(model, triples, known_triples, bidirectional=True,
         raise ValueError("candidate_batch_size must be positive.")
     tails_filter, heads_filter = directional_filters(known_triples)
     num_queries = len(triples) * (2 if bidirectional else 1)
-    scores = np.empty((num_queries, model.num_entities, 2), dtype=np.float32)
+    scores = np.empty((num_queries, model.num_entities, 3), dtype=np.float32)
     valid = np.ones((num_queries, model.num_entities), dtype=bool)
     targets = np.empty(num_queries, dtype=np.int64)
     relations = np.empty(num_queries, dtype=np.int64)
-    device = model.alpha_tensor.device
+    device = model.modality_weights.device
     model.eval()
     query = 0
     with torch.no_grad():
@@ -152,8 +168,9 @@ def build_score_cache(model, triples, known_triples, bidirectional=True,
                     h = candidates if direction == "head" else torch.full_like(candidates, int(head))
                     t = candidates if direction == "tail" else torch.full_like(candidates, int(tail))
                     r = torch.full_like(candidates, int(relation))
-                    scores[query, start:end, 0] = model.score_visual_evidence(h, r, t).cpu().numpy()
-                    scores[query, start:end, 1] = model.score_textual_evidence(h, r, t).cpu().numpy()
+                    for index, name in enumerate(MODALITIES):
+                        scorer = getattr(model, f"score_{name}_evidence")
+                        scores[query, start:end, index] = scorer(h, r, t).cpu().numpy()
                 query += 1
                 if progress is not None and (query % 50 == 0 or query == num_queries):
                     progress(query, num_queries)
@@ -163,32 +180,41 @@ def build_score_cache(model, triples, known_triples, bidirectional=True,
 def compare_searches(cache, budget, seed=42, grid_points=None, ks=(1, 3, 10)):
     """Compare equal/single-modality weights, random search, and grid search.
 
-    Random search includes the same three reference weights as the GA and
-    uses the GA's number of unique fitness evaluations as its budget. The
-    grid uses that many evenly spaced points unless explicitly overridden.
+    Random search includes the same four references as the GA and uses its
+    unique-evaluation budget. The simplex grid uses the largest complete
+    triangular lattice within grid_points (or that budget). Report its actual
+    count, which can be smaller than the cap. A 0.05 grid has 231 candidates.
     Winners are selected strictly by validation MRR; test data is not used.
     """
     import random
 
-    if budget < 3 or (grid_points is not None and grid_points < 3):
-        raise ValueError("Search comparisons require at least 3 evaluations.")
+    if budget < 4 or (grid_points is not None and grid_points < 3):
+        raise ValueError("Use a search budget of at least 4 and grid cap of at least 3.")
     references = {
-        label: {"alpha": alpha, "validation": cache.metrics(alpha, ks=ks)}
-        for label, alpha in (("textual_only", 0.0), ("equal_weights", 0.5), ("visual_only", 1.0))
+        label: {"weights": named_weights(weights), "validation": cache.metrics(weights, ks=ks)}
+        for label, weights in zip(("equal_weights", "visual_only", "textual_only", "structural_only"),
+                                  reference_weights())
     }
     generator = random.Random(seed)
-    random_alphas = [0.0, 0.5, 1.0] + [generator.uniform(0, 1) for _ in range(budget - 3)]
+    random_vectors = reference_weights() + [sample_weights(generator) for _ in range(budget - 4)]
 
-    def best(alphas):
-        """Evaluate each alpha and retain its full metrics for reporting."""
+    def best(vectors):
+        """Evaluate every vector and retain the validation winner's metrics."""
         winner = None
-        for alpha in alphas:
-            metrics = cache.metrics(float(alpha), ks=ks)
+        for weights in vectors:
+            metrics = cache.metrics(weights, ks=ks)
             if winner is None or metrics["MRR"] > winner["validation"]["MRR"]:
-                winner = {"alpha": float(alpha), "validation": metrics}
-        winner["evaluations"] = len(alphas)
+                winner = {"weights": named_weights(weights), "validation": metrics}
+        winner["evaluations"] = len(vectors)
         return winner
 
-    references["random_search"] = best(random_alphas)
-    references["grid_search"] = best(np.linspace(0, 1, grid_points or budget))
+    references["random_search"] = best(random_vectors)
+    cap = grid_points or budget
+    divisions = 1
+    while (divisions + 2) * (divisions + 3) // 2 <= cap:
+        divisions += 1
+    vectors = [(i / divisions, j / divisions, (divisions - i - j) / divisions)
+               for i in range(divisions + 1) for j in range(divisions - i + 1)]
+    references["grid_search"] = best(vectors)
+    references["grid_search"].update({"divisions": divisions, "evaluation_cap": cap})
     return references

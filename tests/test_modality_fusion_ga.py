@@ -23,10 +23,10 @@ import yaml
 
 from vlkge import helpers
 from vlkge.dataloader import KGDataset
-from vlkge.ga.evaluation import build_score_cache, directional_filters
-from vlkge.ga.modality_fusion_ga import GAConfig, arithmetic_crossover, run_ga
+from vlkge.ga.evaluation import build_score_cache, directional_filters, known_triples_for_split
+from vlkge.ga.modality_fusion_ga import GAConfig, arithmetic_crossover, bounded_sbx_crossover, run_ga, reference_weights
 from vlkge.ga.run_fusion_ga import file_sha256, load_experiment, main as run_search
-from vlkge.models.mas_gatranse import MASGATransE
+from vlkge.models.mas_gatranse import MASGATransE, MODALITIES, EQUAL_WEIGHTS, validate_weights
 from vlkge.mas.run_ga_mas import build_ga_environment
 from vlkge.mas.evaluate_ga_mas import main as evaluate_agents
 from vlkge.scripts.train import main as train_model
@@ -38,10 +38,13 @@ class EvolutionTests(unittest.TestCase):
     def test_seeded_search_preserves_elites_and_random_state(self):
         config = GAConfig(population_size=8, generations=6, patience=None)
         state = random.getstate()
-        first = run_ga(lambda a: 1 - (a - 0.75) ** 2, config)
+        def fitness(weights):
+            return 1 - sum((w - target) ** 2 for w, target in zip(weights, (0.6, 0.3, 0.1))) / 2
+        first = run_ga(fitness, config)
         self.assertEqual(random.getstate(), state)
-        self.assertEqual(first, run_ga(lambda a: 1 - (a - 0.75) ** 2, config))
-        self.assertGreaterEqual(first["best_mrr"], 0.9375)
+        self.assertEqual(first, run_ga(fitness, config))
+        self.assertGreaterEqual(first["best_mrr"], max(fitness(w) for w in reference_weights()))
+        self.assertEqual(set(first["best_weights"]), set(MODALITIES))
         history = [row["best_mrr"] for row in first["history"]]
         self.assertEqual(history, sorted(history))
         self.assertGreaterEqual(first["fitness_requests"], first["unique_evaluations"])
@@ -57,18 +60,20 @@ class EvolutionTests(unittest.TestCase):
                 GAConfig(**options)
 
     def test_arithmetic_uses_original_parents_and_stays_bounded(self):
-        first, second = [0.2], [0.8]
+        first, second = [0.2, 0.5, 0.3], [0.8, 0.1, 0.1]
         with patch("vlkge.ga.modality_fusion_ga.random.random", return_value=0.25):
             arithmetic_crossover(first, second)
-        self.assertAlmostEqual(first[0], 0.65)
-        self.assertAlmostEqual(second[0], 0.35)
+        np.testing.assert_allclose(first, (0.65, 0.2, 0.15))
+        np.testing.assert_allclose(second, (0.35, 0.4, 0.25))
 
     def test_sbx_reset_bounds_and_flat_fitness_stopping(self):
         seen = []
 
-        def fitness(alpha):
-            self.assertTrue(0 <= alpha <= 1)
-            seen.append(alpha)
+        def fitness(weights):
+            self.assertEqual(len(weights), 3)
+            self.assertTrue(all(0 <= w <= 1 for w in weights))
+            self.assertAlmostEqual(sum(weights), 1.)
+            seen.append(tuple(weights))
             return 0.5
 
         result = run_ga(fitness, GAConfig(
@@ -77,7 +82,21 @@ class EvolutionTests(unittest.TestCase):
         ))
         self.assertEqual(result["generations_completed"], 2)
         self.assertEqual(result["stopping_reason"], "no_improvement")
-        self.assertTrue({0.0, 0.5, 1.0}.issubset(seen))
+        self.assertTrue(set(reference_weights()).issubset(seen))
+
+    def test_sbx_preserves_simplex_before_any_mutation(self):
+        """Check crossover itself; a later full reset must not hide invalid sums."""
+        state = random.getstate()
+        try:
+            random.seed(42)
+            for _ in range(50):
+                first, second = [0.1, 0.2, 0.7], [0.8, 0.15, 0.05]
+                bounded_sbx_crossover(first, second, eta=20.)
+                for child in (first, second):
+                    self.assertEqual(len(validate_weights(child)), 3)
+                    self.assertAlmostEqual(sum(child), 1.)
+        finally:
+            random.setstate(state)
 
 
 class RankingTests(unittest.TestCase):
@@ -100,15 +119,32 @@ class RankingTests(unittest.TestCase):
         cached = build_score_cache(model, triples, known, candidate_batch_size=2)
         frame = pd.DataFrame(triples, columns=["head", "relation", "tail"])
         loader = DataLoader(KGDataset(frame, {0: 0, 1: 1, 2: 2}, {0: 0}), batch_size=2)
-        for alpha in (0.0, 0.37, 0.5, 1.0):
-            model.set_alpha(alpha)
+        self.assertEqual(cached.scores.shape[-1], 3)
+        for weights in reference_weights() + [(0.37, 0.28, 0.35)]:
+            model.set_weights(weights)
             expected_mrr, expected_hits, _ = helpers.evaluate_kge(
                 model, loader, tails, head_filter_map=heads
             )
-            actual = cached.metrics(alpha)
+            actual = cached.metrics(weights)
             self.assertAlmostEqual(actual["MRR"], expected_mrr)
             for k, expected in expected_hits.items():
                 self.assertAlmostEqual(actual[f"Hits@{k}"], expected)
+
+    def test_invalid_weights_rejected_and_buffer_preserved(self):
+        features = torch.eye(3)
+        model = MASGATransE(3, 1, 3, visual_features=features, textual_features=features,
+                           visual_entity_to_index={0: 0, 1: 1, 2: 2},
+                           textual_entity_to_index={0: 0, 1: 1, 2: 2})
+        buffer = model.modality_weights
+        model.set_weights({"visual": 0.1, "textual": 0.2, "structural": 0.7})
+        self.assertIs(model.modality_weights, buffer)
+        self.assertIn("modality_weights", model.state_dict())
+        self.assertNotIn("modality_weights", dict(model.named_parameters()))
+        self.assertFalse(buffer.requires_grad)
+        for values in ([0., 0., 0.], [1., 1., 1.], [-0.1, 0.5, 0.6],
+                       [float("nan"), 0., 1.], [float("inf"), 0., 0.], [0.5, 0.5]):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                model.set_weights(values)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -130,7 +166,7 @@ class WorkflowTests(unittest.TestCase):
                     pickle.dump(dict(zip(entities, values)), stream)
             checkpoint_path = root / "scorer.pt"
             config = {
-                "dataset": "wn9_img", "data_path": str(data_path), "model": "MASGATransE",
+                "dataset": "wn9_img", "data_path": str(data_path), "model": "TransE",
                 "visual_features_path": str(root / "visual.pkl"),
                 "textual_features_path": str(root / "textual.pkl"),
                 "embedding_dim": 2, "fusion_mode": "average", "use_structural": False,
@@ -145,10 +181,18 @@ class WorkflowTests(unittest.TestCase):
             config_path = root / "config.yaml"
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             with redirect_stdout(io.StringIO()):
-                with patch.object(sys, "argv", ["train", "--config", str(config_path), "--no_cuda"]):
+                with patch.object(sys, "argv", ["train", "--config", str(config_path), "--no_cuda",
+                                                "--model", "MASGATransE", "--use_structural", "--lr", "0.02"]):
                     train_model()
-                model, _, _ = load_experiment(config_path, checkpoint_path, torch.device("cpu"))
+                model, loaded_data, effective_config = load_experiment(config_path, checkpoint_path, torch.device("cpu"))
+                self.assertEqual(effective_config["model"], "MASGATransE")
+                self.assertTrue(effective_config["use_structural"])
+                self.assertEqual(effective_config["lr"], 0.02)
+                self.assertEqual(yaml.safe_load(config_path.read_text())["model"], "TransE")
                 self.assertTrue(all(not p.requires_grad for p in model.parameters()))
+                known_validation = known_triples_for_split(loaded_data, "val")
+                self.assertEqual(len(known_validation), 14)
+                self.assertEqual(len(known_triples_for_split(loaded_data, "test")), 16)
                 original_hash = file_sha256(checkpoint_path)
                 arguments = [
                     "--config", str(config_path), "--checkpoint", str(checkpoint_path),
@@ -165,7 +209,9 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIn("test", report["methods"]["ga"])
                 self.assertEqual(report["methods"]["random_search"]["evaluations"],
                                  report["ga"]["unique_evaluations"])
-                self.assertAlmostEqual(report["visual_weight"] + report["textual_weight"], 1)
+                self.assertAlmostEqual(sum(report["weights"].values()), 1)
+                self.assertEqual(report["modality_order"], list(MODALITIES))
+                self.assertIn("structural_only", report["methods"])
                 self.assertEqual(file_sha256(checkpoint_path), original_hash)
                 environment, agent_model, _ = build_ga_environment(
                     config_path, checkpoint_path, root / "search" / "fusion_weights.json",
@@ -177,7 +223,8 @@ class WorkflowTests(unittest.TestCase):
                 head, relation, tail = adapter.candidate_to_tensors(environment.current_candidate)
                 self.assertEqual(environment.decisor_agent.combined_score,
                                  agent_model(head, relation, tail).item())
-                self.assertEqual(environment.decisor_agent.decision_message, "unclassified")
+                self.assertIn(environment.decisor_agent.decision_message, ("accepted", "rejected"))
+                self.assertEqual(environment.decision_threshold, 0.5)
                 evaluation_arguments = [
                     "--config", str(config_path), "--checkpoint", str(checkpoint_path),
                     "--fusion-weights", str(root / "search" / "fusion_weights.json"),
@@ -191,10 +238,11 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(summary["max_agent_model_score_difference"], 0.)
                 csv_rows = pd.read_csv(root / "agents_val" / "agent_scores.csv")
                 self.assertEqual(len(csv_rows), 2)
+                self.assertIn("structural_score", csv_rows.columns)
                 messages = [json.loads(line) for line in
                             (root / "agents_val" / "agent_messages.jsonl").read_text(encoding="utf-8").splitlines()]
                 self.assertEqual(len(messages), 2)
-                self.assertTrue(all(len(row["messages"]) == 3 for row in messages))
+                self.assertTrue(all(len(row["messages"]) == 4 for row in messages))
                 test_summary = evaluate_agents(evaluation_arguments + [
                     "--split", "test", "--output-dir", str(root / "agents_test"),
                 ])
@@ -207,7 +255,15 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(file_sha256(checkpoint_path), original_hash)
                 run_search(arguments + ["--weights", str(report_path), "--output-dir", str(root / "reuse")])
                 reused = json.loads((root / "reuse" / "fusion_result.json").read_text(encoding="utf-8"))
-                self.assertEqual(report["visual_weight"], reused["visual_weight"])
+                self.assertEqual(report["weights"], reused["weights"])
+                # A new structural checkpoint must not be confused with the old alpha schema.
+                legacy = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                legacy["model_state_dict"].pop("modality_weights")
+                legacy["model_state_dict"]["alpha_tensor"] = torch.tensor(0.5)
+                legacy_path = root / "legacy.pt"
+                torch.save(legacy, legacy_path)
+                with self.assertRaisesRegex(ValueError, "three-modality checkpoint"):
+                    load_experiment(config_path, legacy_path, torch.device("cpu"))
 
 
 if __name__ == "__main__":

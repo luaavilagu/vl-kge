@@ -1,29 +1,60 @@
-"""Separate TransE modality scores with an externally controlled fusion weight.
+"""Three separate TransE scores with externally controlled simplex weights.
 
 Relation vectors are learned once using the existing TransE training loop.
-After loading that checkpoint, DEAP searches alpha while all model parameters
-stay frozen. No ANN scoring layers or genetic operators belong in this model.
+Structural entity embeddings and relations learn with equal thirds. DEAP then
+searches relative contributions while every model parameter stays frozen.
+No ANN scoring layers or genetic operators belong in this model.
 """
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vlkge.models.vlkge import VLKGEBase
 
+MODALITIES = ("visual", "textual", "structural")
+EQUAL_WEIGHTS = (1 / 3, 1 / 3, 1 / 3)
+
+
+def validate_weights(weights):
+    """Return three finite, nonnegative weights in the fixed modality order.
+
+    Accept a sequence or a dictionary keyed by MODALITIES. Reject missing
+    modalities, negative values, and sums outside a small roundoff tolerance.
+    Normalize only that accepted roundoff so model, agents, and caches share
+    the same interpretation. Do not silently repair arbitrary caller errors.
+    """
+    if isinstance(weights, dict):
+        if set(weights) != set(MODALITIES):
+            raise ValueError(f"Weights must name exactly {MODALITIES}.")
+        weights = [weights[name] for name in MODALITIES]
+    try:
+        values = tuple(float(value) for value in weights)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Expected three numeric modality weights.") from error
+    if len(values) != 3 or not all(math.isfinite(v) and 0 <= v <= 1 for v in values):
+        raise ValueError("Expected three finite weights in [0, 1].")
+    total = math.fsum(values)
+    if not math.isclose(total, 1.0, rel_tol=0, abs_tol=1e-6):
+        raise ValueError("Modality weights must sum to one.")
+    return tuple(value / total for value in values)
+
+
 class MASGATransE(VLKGEBase):
     """
-    Score modalities independently, then return alpha*S_visual+(1-alpha)*S_textual.
+    Return w_visual*S_visual + w_textual*S_textual + w_structural*S_structural.
 
-    Entity embeddings are L2-normalized within each modality. Both scores use
-    the same learned relation translation, margin, and distance norm. Alpha is
-    a scalar buffer, so checkpoints/device moves preserve it and optimizers
-    exclude it. Training starts at alpha=0.5; GA search updates only alpha.
+    Each modality uses L2-normalized entities and the same relation vector.
+    modality_weights is a three-element buffer saved in checkpoints and moved
+    with the model, but excluded from gradient optimization. Its default is
+    equal thirds. Structural entities and relations are trainable initially;
+    the supplied visual/textual feature tables remain frozen by default.
     """
     
     def __init__(self, num_entities, num_relations, embedding_dim,
                  visual_features=None, textual_features=None, relation_features=None,
                  visual_entity_to_index=None, textual_entity_to_index=None,
                  fusion_mode="average", 
-                 use_structural=False, use_visual=True, use_textual=True,
+                 use_structural=True, use_visual=True, use_textual=True,
                  freeze_visual=True, freeze_textual=True,
                  visual_proj=False, textual_proj=False,
                  shared_projection=None,
@@ -32,7 +63,7 @@ class MASGATransE(VLKGEBase):
                  normalize_before_fusion=False,
                  normalize_relations=True, p_norm=1,
                  raw_margin=12.0, device=torch.device('cpu'),
-                 alpha=0.5
+                 weights=None
                  ):
         """
         Args:
@@ -45,17 +76,18 @@ class MASGATransE(VLKGEBase):
                 experiment uses None and learns randomly initialized relations.
             p_norm: L1 or L2 distance, selected by 1 or 2.
             raw_margin: Constant added to negative translation distances.
-            alpha: Finite visual weight in [0, 1], default 0.5. Textual weight
-                is always derived as 1-alpha rather than stored independently.
+            weights: Three nonnegative values summing to one, ordered visual,
+                textual, structural; or a dictionary naming those modalities.
+                None selects equal thirds. The GA changes this buffer only.
             device: Initial device; the factory subsequently moves the model.
             Other options: Passed to VLKGEBase for feature loading/projection.
-                Structural embeddings and embedding-level fusion are not part
-                of this model's score; use the dedicated training configuration.
+                fusion_mode='average' retains base-class shape conventions;
+                this class performs score-level rather than embedding fusion.
         """
-        if use_structural or not (use_visual and use_textual):
-            raise ValueError("MASGATransE requires visual/textual modalities and no structural embeddings.")
+        if not (use_structural and use_visual and use_textual):
+            raise ValueError("MASGATransE requires structural, visual, and textual modalities.")
         if fusion_mode != "average":
-            raise ValueError("Use fusion_mode='average'; alpha controls score-level fusion separately.")
+            raise ValueError("Use fusion_mode='average'; modality weights control score-level fusion.")
         if p_norm not in (1, 2):
             raise ValueError("p_norm must be 1 or 2.")
         super().__init__(
@@ -97,10 +129,8 @@ class MASGATransE(VLKGEBase):
             self.relation_embeddings = nn.Embedding(num_relations, final_dim)
             self.relation_proj = None
 
-        if not (alpha <= 1 and alpha >= 0):
-            raise ValueError(f"Alpha is not between [0,1]. Got: {alpha  }")
-
-        self.register_buffer("alpha_tensor", torch.tensor(alpha, dtype=torch.float32),)
+        initial_weights = validate_weights(EQUAL_WEIGHTS if weights is None else weights)
+        self.register_buffer("modality_weights", torch.tensor(initial_weights, dtype=torch.float32))
 
         # Initialize parameters
         self.reset_parameters()        
@@ -108,7 +138,7 @@ class MASGATransE(VLKGEBase):
     def reset_parameters(self):
         """Initialize learned tables/projections, preserving supplied relations.
 
-        This does not reset alpha. Supplied relation features, when explicitly
+        This does not reset fusion weights. Supplied relation features, when explicitly
         used, retain their initial values rather than being overwritten.
         """
         # 1. Structural embeddings
@@ -189,45 +219,42 @@ class MASGATransE(VLKGEBase):
 
         return textual_transe_score
 
-    def set_alpha(self, alpha):
-        """Validate and fill the existing scalar buffer without tracking gradients.
+    def score_structural_evidence(self, head, relation, tail):
+        """Return structural TransE evidence with no neural scoring head.
 
-        DEAP passes a Python number from an individual's single gene. In-place
-        filling preserves the buffer's identity, dtype, device, and checkpoint
-        registration. This method changes no embeddings or relation vectors.
+        The structural entity table and shared relations receive gradients
+        during checkpoint training and are frozen before genetic search.
         """
-        if not (alpha >= 0 and alpha <= 1):
-            raise ValueError("The provided number must be between 0 and 1.")
+        head_emb = F.normalize(self.get_structural_embedding(head), p=2, dim=-1)
+        tail_emb = F.normalize(self.get_structural_embedding(tail), p=2, dim=-1)
+        relation_emb = self.get_relation_representations(relation)
+        return self.raw_margin - torch.norm(head_emb + relation_emb - tail_emb,
+                                            p=self.p_norm, dim=-1)
 
+    def set_weights(self, weights):
+        """Validate and copy three weights in place without tracking gradients.
+
+        Preserve buffer identity/device/dtype and leave every model parameter
+        unchanged. DEAP individuals and named weight dictionaries are accepted.
+        """
+        values = validate_weights(weights)
         with torch.no_grad():
-            self.alpha_tensor.fill_(alpha)
+            self.modality_weights.copy_(self.modality_weights.new_tensor(values))
 
-    def fuse_evidence_scores(self, visual_score, textual_score):
-        """Use the same alpha fusion for model inference and agent messages.
-
-        Inputs may be score tensors from forward() or scalar numbers from the
-        visual/textual agents. Convert them to the alpha buffer's device and
-        dtype before weighting. Existing tensors retain their gradient path,
-        so this method also supports relation learning during training.
-
-        Sharing this operation prevents the decision agent from silently
-        using equal weights after the GA has selected another alpha.
-        """
-        visual = torch.as_tensor(
-            visual_score, dtype=self.alpha_tensor.dtype, device=self.alpha_tensor.device
-        )
-        textual = torch.as_tensor(
-            textual_score, dtype=self.alpha_tensor.dtype, device=self.alpha_tensor.device
-        )
-        return self.alpha_tensor * visual + (1 - self.alpha_tensor) * textual
+    def fuse_evidence_scores(self, visual_score, textual_score, structural_score):
+        """Share the same differentiable three-score fusion with the agents."""
+        scores = [torch.as_tensor(value, dtype=self.modality_weights.dtype,
+                                  device=self.modality_weights.device)
+                  for value in (visual_score, textual_score, structural_score)]
+        # Keep this operation order identical to the NumPy ranking cache.
+        return (self.modality_weights[0] * scores[0] + self.modality_weights[1] * scores[1]
+                + self.modality_weights[2] * scores[2])
 
     def forward(self, head, relation, tail):
         """
-        MASGATransE forward pass: score = (alpha) * S_visual + (1 - alpha) * S_textual
-        where:
-            S_visual  = margin - ||h_v + r - t_v||_p
-            S_textual = margin - ||h_t + r - t_t||_p 
-            alpha is a global weight between 0 and 1, defaulting to 0.5.
+        Fuse visual, textual, and structural TransE scores using the buffer.
+        Each score is margin minus its modality's translation distance. The
+        default weights are equal thirds and remain fixed during training.
             
         Args:
             head: Head entity IDs (batch_size,)
@@ -240,5 +267,5 @@ class MASGATransE(VLKGEBase):
 
         visual_score = self.score_visual_evidence(head, relation, tail)
         textual_score = self.score_textual_evidence(head, relation, tail)
-
-        return self.fuse_evidence_scores(visual_score, textual_score)
+        structural_score = self.score_structural_evidence(head, relation, tail)
+        return self.fuse_evidence_scores(visual_score, textual_score, structural_score)

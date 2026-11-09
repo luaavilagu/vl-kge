@@ -1,151 +1,95 @@
-MODALITY-FUSION GA FOR TRANSE: DESIGN AND STARTING CONFIGURATION
+THREE-MODALITY GA FUSION FOR TRANSE
+================================
 
-Purpose
--------
-Use DEAP to optimize one global fusion weight for separate visual and
-textual TransE-style scores on WN9-IMG. No neural scoring layers are used.
-Keep the evidence-scoring model fixed throughout the GA search.
+Agreed design
+-------------
+Train once, freeze the checkpoint, evolve relative contributions.
+Use separate visual, textual, and structural TransE scores without ANN heads.
+Fixed modality order: visual, textual, structural.
+Individual: [w_visual, w_textual, w_structural].
+Every weight is finite/nonnegative and the sum is one (two degrees of freedom).
+Fitness: maximize filtered validation MRR for head and tail prediction.
+Accepted/rejected decisions are incidental and do not enter the fitness.
 
-Scope
------
-Dataset: wn9_img.
-Modalities: visual and textual, scored separately.
-Fusion: combine scores, rather than fuse embeddings before scoring.
-Structural evidence: outside this initial experiment.
-No pre-existing model checkpoint is required to start training. Train the
-scoring model first with alpha=0.5, then load its checkpoint for GA search.
-All model parameters remain frozen during that search.
+Training stage
+--------------
+Reuse vlkge/configs/wn9_img/transe_clip.yaml. Create no new config file.
+CLI overrides select MASGATransE and enable all three modalities.
+Start with equal thirds; learn structural entity embeddings and shared
+relations using the existing negative sampling, logistic loss, and Adagrad.
+Keep supplied visual/textual feature tables frozen.
+Save the effective CLI-overridden settings and mappings in the checkpoint.
+A fresh three-modality checkpoint is required; preserve the old experiment.
+Defer final test evaluation with --skip_final_test.
 
-Chromosome and scoring
-----------------------
-Each DEAP individual contains one real-valued gene: [a], with 0 <= a <= 1.
-Decode it as visual_weight = a and textual_weight = 1 - a.
-The same weights apply to every relation and triple.
-
-visual_score = margin - ||normalized_visual_head + relation
-                         - normalized_visual_tail||_p
-textual_score = margin - ||normalized_textual_head + relation
-                          - normalized_textual_tail||_p
-fused_score = a * visual_score + (1 - a) * textual_score
-
-Higher scores rank first. Scores are not calibrated probabilities.
-Use the same margin and norm in both modalities. A shared constant margin
-does not change rankings because the weights sum to one.
-
-Selected GA components
-----------------------
-Representation: one independent weight.
-Parent selection: tournament selection (DEAP tools.selTournament).
-Crossover alternatives:
-  A. Arithmetic crossover, implemented as a custom DEAP mate operator.
-     For parents a and b and a random coefficient c in [0, 1]:
-       child_1 = c*a + (1-c)*b
-       child_2 = (1-c)*a + c*b
-     This preserves the [0, 1] bounds.
-  B. Bounded simulated binary crossover
-     (DEAP tools.cxSimulatedBinaryBounded).
-     Starting parameters: eta=20, low=0, up=1.
-     Larger eta generally produces children closer to the parents.
-The crossover choice is not yet finalized. Arithmetic is the recommended
-starting option for explaining the algorithm; bounded SBX is an alternative.
-
-Mutation: random reset, implemented as a custom DEAP mutate operator.
-When mutation is invoked, replace the gene with a fresh uniform sample
-from [0, 1]. Derive the textual weight again as 1 - visual_weight.
-Unlike Gaussian mutation, random reset can make a large jump.
-
-Elite preservation: clone the best individuals into the next population
-without crossover or mutation. HallOfFame records the best solution but
-does not automatically preserve it in the evolving population.
-
-Starting configuration (proposed, not tuned)
-------------------------------------------
-Population size: 30.
-Initialization: include [0.0], [0.5], and [1.0]; draw the remaining 27
-individuals uniformly from [0, 1].
-Fitness: maximize filtered validation MRR; DEAP returns fitness as (mrr,).
-Selection: tournament, tournsize=3.
-Crossover: arithmetic recommended; bounded SBX remains an option.
-Crossover probability: 0.8 per selected parent pair.
-Mutation: random reset.
+GA stage
+--------
+Freeze every model parameter, including structural entities and relations.
+Cache three scores per replacement candidate.
+Population 30: equal thirds + three single-modality vertices + 26 random vectors.
+Initialization: uniform weight triangle, Dirichlet(1,1,1).
+Selection: tournament size 3.
+Crossover: arithmetic, one shared coefficient for the entire vector.
+Crossover probability: 0.8 per parent pair.
+Optional bounded SBX: eta 20, followed by sum-to-one repair.
+Mutation: reset the complete vector uniformly over the valid triangle.
 Mutation probability: 0.2 per offspring.
-Per-gene mutation probability: 1.0 when mutation is invoked.
-Elites: 2 unchanged individuals per generation.
-Replacement: custom generational loop using DEAP operators.
-Maximum generations: 30, following initial-population evaluation.
-Early stopping: optionally stop after 10 generations with no improvement
-in the best validation MRR; record which stopping rule was used.
-Initial random seed: 42; repeat experiments with additional recorded seeds.
-Variation semantics: crossover and mutation are independent stages, so
-the same offspring can receive both operations.
-Entity normalization: L2 normalization separately in each modality.
-Distance norm: start with p=1, matching the repository's TransE default.
-Relation normalization: decide with the relation-learning baseline; keep
-it fixed throughout the GA. Original TransE does not require unit-norm
-relation vectors.
+Elites: 2 unchanged individuals.
+Maximum generations: 30 after evaluating the initial population.
+Default patience: 10; --patience 0 disables early stopping.
+Seed: 42; repeat with other seeds and separate output paths as needed.
+Crossover and mutation are independent stages.
+Memoize immutable weight-vector tuples; report requests and unique evaluations.
+These are starting settings, not tuned optima or guaranteed global optima.
 
-Evaluation and implementation requirements
-------------------------------------------
-Use WN9-IMG's existing train/validation/test splits.
-If learning relation translations, use training triples only.
-Do not update embeddings or relation vectors for each GA individual.
-Cache fixed modality scores when practical, then recombine by weight.
-Use all entity candidates initially and evaluate both head and tail queries.
-Keep head and tail filtering maps separate. Filter other known answers,
-while retaining the query's target. State the known-triple filtering policy.
-Use one explicit, consistent ranking tie policy for every method.
-Use validation data for fusion-weight selection; keep test metrics out
-of fitness and operator tuning.
-Clone selected parents before modifying them; invalidate offspring fitness
-after variation. Preserve elite fitness when their parameters are unchanged.
-Track best and mean fitness, weight diversity, fitness evaluations, seed,
-and stopping reason.
-Report final MRR, Hits@1, Hits@3, Hits@10, and per-relation metrics.
-Compare against visual-only, textual-only, equal weights, random search,
-and a one-dimensional grid search. State and align evaluation budgets.
+Evaluation and comparisons
+--------------------------
+All entities are replacement candidates; use both head and tail queries.
+Separate head/tail filters, retaining each query's target.
+GA/agent validation filters: training + full validation positives.
+Final test filters: training + validation + test positives.
+Stable ties: score descending, entity ID ascending.
+The existing training helper retains its earlier all-known filtering; use
+fresh equal-thirds metrics for comparisons, not older training/ANN log numbers.
+Report overall and per-relation MRR and Hits@1/3/10.
+Baselines: equal thirds and visual-only/textual-only/structural-only.
+Random-search budget matches GA unique evaluations and includes all references.
+Grid-search budget is a cap on a complete triangular lattice; report actual
+count. A 0.05 lattice has 231 candidates. Test metrics do not select weights.
 
-Selected scoring design: relation translations
----------------------------------------------
-A pretrained relation description embedding and a TransE relation
-translation are not automatically equivalent. Equal dimensions allow
-addition, but do not establish h + relation ~= t for true triples.
+Agents and reporting
+--------------------
+VisualAgent, TextualAgent, StructuralAgent, then DecisorAgent.
+Four messages per observed triple. Keep structural scores in CSV/JSONL.
+Adapter and model use one shared three-score fusion method.
+Preserve decision threshold 0.5 for the ANN-style decision test, outside MRR.
+Version 2 files record modality_order, all named weights, and checkpoint hash.
+Reject old two-modality checkpoint/weights in structural inference.
+Continue displaying archived two-modality summary files without changing them.
+Show equal-thirds and best-vector metrics in ANN-style reports.
 
-Learn a shared relation translation from training triples using separate
-visual/textual distances with equal-weight fusion. Reuse the repository's
-negative sampling, logistic loss, and Adagrad optimizer. Freeze the trained
-checkpoint before GA optimization. No neural scoring layers are necessary.
-The GA evolves only alpha and never updates relation embeddings.
+Commands
+--------
+See vlkge/ga/README.md for background/nohup and all validation/test commands.
 
-Implementation and commands
----------------------------
-See vlkge/ga/README.md for workflow details and output descriptions.
-Core GA: vlkge/ga/modality_fusion_ga.py (DEAP types and genetic operators).
-Cached ranking: vlkge/ga/evaluation.py.
-Checkpoint/search entry point: vlkge/ga/run_fusion_ga.py.
-Training configuration: vlkge/configs/wn9_img/mas_gatranse_clip.yaml.
-Start training from the repository root:
-  python -m vlkge.scripts.train --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml
-Then search the resulting checkpoint:
-  python -m vlkge.ga.run_fusion_ga --config vlkge/configs/wn9_img/mas_gatranse_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_multimodal/seed42.pt
-Use --evaluate-test only after choosing the search configuration on validation.
+Train (create the output directory before redirecting a background log):
+python -m vlkge.scripts.train --config vlkge/configs/wn9_img/transe_clip.yaml --model MASGATransE --fusion_mode average --use_structural --use_visual --use_textual --seed 42 --skip_final_test --save_path runs/wn9_img/mas_gatranse_3modalities/mas_gatranse_average_3modalities_seed42.pt
 
-Implications
-------------
-Scoring quality, embedding compatibility, score scale, filtering, and data
-leakage can affect the results. They can also require changes to scoring,
-caching, and evaluation code. They generally do not require changing the
-chromosome, tournament selection, crossover, or random-reset mutation.
-The GA searches for better combinations of the provided scores; it cannot
-repair arbitrary or uninformative relation translations by weighting alone.
-Avoid interpreting selected weights as intrinsic modality importance.
+Evolve:
+python -m vlkge.ga.run_fusion_ga --config vlkge/configs/wn9_img/transe_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_3modalities/mas_gatranse_average_3modalities_seed42.pt --output-dir runs/wn9_img/mas_gatranse_3modalities/ga_seed42
 
-Primary references
-------------------
-TransE paper:
-https://papers.neurips.cc/paper_files/paper/2013/file/1cecc7a77928ca8133fa24680a88d2f9-Paper.pdf
-DEAP evolutionary tools:
-https://deap.readthedocs.io/en/master/api/tools.html
-DEAP algorithms:
-https://deap.readthedocs.io/en/master/api/algo.html
-DEAP operator lifecycle:
-https://deap.readthedocs.io/en/master/tutorials/basic/part2.html
+Agents on validation:
+python -m vlkge.mas.evaluate_ga_mas --config vlkge/configs/wn9_img/transe_clip.yaml --checkpoint runs/wn9_img/mas_gatranse_3modalities/mas_gatranse_average_3modalities_seed42.pt --fusion-weights runs/wn9_img/mas_gatranse_3modalities/ga_seed42/fusion_weights.json --split val --output-dir runs/wn9_img/mas_gatranse_3modalities/agents_validation
+
+Boundaries
+----------
+The selected weights express relative score contribution for this trained
+checkpoint. They are not probabilities or intrinsic modality importance.
+A fresh checkpoint for each individual is intentionally outside this design.
+No new or changed YAML configuration is required.
+
+References
+----------
+TransE: https://papers.neurips.cc/paper_files/paper/2013/file/1cecc7a77928ca8133fa24680a88d2f9-Paper.pdf
+DEAP: https://deap.readthedocs.io/en/master/api/tools.html
+DEAP algorithms: https://deap.readthedocs.io/en/master/api/algo.html

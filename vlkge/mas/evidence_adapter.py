@@ -74,6 +74,7 @@ class EvidenceAdapter():
         return float(score.item())
 
     def score_structural(self, candidate):
+        """Return structural TransE evidence from the same checkpoint vocabulary."""
         head, relation, tail = self.candidate_to_tensors(candidate)
 
         self.model.eval()
@@ -86,9 +87,11 @@ class EvidenceAdapter():
     def fuse_scores(self, visual_score, textual_score, structural_score):
         """Adapt scalar agent evidence to MASGATransE's shared fusion policy.
 
-        Model alpha must already be loaded from the GA result. The model
+        All three modality weights must be loaded from the GA result. The model
         returns a scalar tensor; agent messages carry its Python float value.
-        The frozen scorer and no_grad context keep this inference-only.
+        The argument order is visual, textual, structural. The frozen scorer
+        and no_grad context keep this inference-only; fusion is shared with
+        forward() rather than implemented as a separate agent-side formula.
         """
         self.model.eval()
         with torch.no_grad():
