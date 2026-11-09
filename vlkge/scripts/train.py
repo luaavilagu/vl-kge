@@ -42,7 +42,7 @@ except ImportError:
         def __call__(self, parser, namespace, values, option_string=None):
             setattr(namespace, self.dest, not option_string.startswith('--no-'))
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='VL-KGE Training',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -198,10 +198,10 @@ Examples:
     parser.add_argument('--downsample_fraction', type=float, default=1.0,
                        help='Fraction of relation to keep per epoch (default: 1.0)')
     
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     # -------- PASS 1: parse only to read --config --------
-    pre, _ = parser.parse_known_args()
+    pre, _ = parser.parse_known_args(argv)
 
     config = None
     if pre.config:
@@ -222,7 +222,7 @@ Examples:
         parser.set_defaults(**yaml_defaults)
 
     # -------- PASS 2: final parse (CLI > YAML > code defaults) --------
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # If you want to keep extra YAML fields (not in argparse), attach them:
     if config is not None:

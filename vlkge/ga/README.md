@@ -174,3 +174,32 @@ agent outputs. Add `--split test` only for final test evaluation. No new
 training or genetic search occurs. `--max-triples` is only an optional smoke
 limit; omit it to process the full split. Default decisions are unclassified
 unless a separately selected `--decision-threshold` is supplied.
+
+## 6. Run fuzzy agents with a standard TransE checkpoint
+
+The standard TransE model is still trained and scored on fused entity
+representations. `EvidenceAdapter` can additionally calculate post-hoc visual,
+textual, and structural TransE evidence from that checkpoint's modality
+embeddings and shared learned relation vectors. These separate evidence
+scores were not independently optimized by the base training loss.
+
+Estimate finite minimum/maximum score ranges for each modality using training
+or validation data, then run one candidate through the agents and fuzzy
+decisor:
+
+```bash
+python -m vlkge.mas.run_fuzzy_transe \
+  --config vlkge/configs/wn9_img/transe_clip.yaml \
+  --checkpoint runs/wn9_img/transe_multimodal/seed42.pt \
+  --visual-range VISUAL_MIN VISUAL_MAX \
+  --textual-range TEXTUAL_MIN TEXTUAL_MAX \
+  --structural-range STRUCTURAL_MIN STRUCTURAL_MAX \
+  --head n11669921 --relation _hyponym --tail n11992806
+```
+
+Replace the range placeholders with measured values; the runner validates
+that scores lie within the supplied ranges rather than clipping them. Its
+output is for a single candidate and is not a full link-prediction ranking
+benchmark. Use a validation-driven ranking evaluator before comparing MRR or
+Hits@K, and keep the test split for final evaluation. This path reuses the
+trained TransE checkpoint and does not retrain the model.
