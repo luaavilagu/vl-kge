@@ -5,9 +5,9 @@ import mesa
 class DecisorAgent(mesa.Agent):
     """Combine this candidate's evidence with the environment's fusion policy.
 
-    The GA policy delegates to the frozen MASGATransE model, ensuring that
-    agent aggregation agrees with the scoring model used to select alpha.
-    Binary decisions are optional and require a supplied threshold.
+    Fusion can delegate to the frozen MASGATransE model or an optional fuzzy
+    evidence aggregator. Binary decisions are optional and require a supplied
+    threshold.
     """
 
     def __init__(self, model):
@@ -22,6 +22,7 @@ class DecisorAgent(mesa.Agent):
         self.decision_message = None
         self.last_message = None
         self.combined_score = None
+        self.fuzzy_result = None
 
     def perceive(self):
         # agent’s internal memory of what it perceived.
@@ -56,7 +57,13 @@ class DecisorAgent(mesa.Agent):
         structural = float(self.structural_message["score"])
         if not math.isfinite(visual) or not math.isfinite(textual) or not math.isfinite(structural):
             raise ValueError("Evidence scores must be finite.")
-        if self.model.score_fusion is None:
+        self.fuzzy_result = None
+        if self.model.fuzzy_aggregator is not None:
+            self.fuzzy_result = self.model.fuzzy_aggregator.evaluate(
+                visual, textual, structural
+            )
+            self.combined_score = float(self.fuzzy_result.score)
+        elif self.model.score_fusion is None:
             self.combined_score = (visual + textual + structural) / 3
         else:
             self.combined_score = float(self.model.score_fusion(visual, textual, structural))
@@ -84,6 +91,8 @@ class DecisorAgent(mesa.Agent):
             "combined_score": self.combined_score,
             "decision_threshold": self.model.decision_threshold,
         }
+        if self.fuzzy_result is not None:
+            self.last_message["fuzzy_confidence"] = self.fuzzy_result.label
 
         self.model.messages.append(self.last_message)
 
