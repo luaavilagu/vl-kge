@@ -97,12 +97,23 @@ def load_transe_fuzzy_environment(config_path, checkpoint_path, score_ranges,
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         raise ValueError("Checkpoint must contain a model_state_dict.")
+    if checkpoint.get("model_name") == "TransEFuzzy":
+        raise ValueError(
+            "This checkpoint was trained as TransEFuzzy. It already includes "
+            "fuzzy fusion in its TransE scoring function."
+        )
     if checkpoint.get("model_name", "TransE") != "TransE":
         raise ValueError("The supplied checkpoint is not a TransE checkpoint.")
     if checkpoint.get("entity_to_id", entity_to_id) != entity_to_id:
         raise ValueError("Dataset entity IDs differ from the checkpoint.")
     if checkpoint.get("relation_to_id", relation_to_id) != relation_to_id:
         raise ValueError("Dataset relation IDs differ from the checkpoint.")
+    training_config = checkpoint.get("training_config") or {}
+    if training_config.get("fuzzy_fusion", False):
+        raise ValueError(
+            "This checkpoint already uses train-time fuzzy TransE fusion. "
+            "Do not apply the post-hoc fuzzy MAS aggregator to it again."
+        )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.requires_grad_(False)
     model.eval()

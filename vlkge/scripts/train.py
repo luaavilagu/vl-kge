@@ -8,6 +8,7 @@ import hashlib
 import argparse
 import sys
 import yaml
+import math
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
@@ -76,7 +77,7 @@ Examples:
     
     # Model
     parser.add_argument('--model', type=str, default='TransE',
-                       choices=['TransE', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE', 'MASNeuralTransE', 'MASGATransE'],
+                       choices=['TransE', 'TransEFuzzy', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE', 'MASNeuralTransE', 'MASGATransE'],
                        help='KGE model (default: TransE)')
     parser.add_argument('--fusion_mode', type=str, default='average',
                        choices=['average', 'concat', 'weighted', 'addition'],
@@ -121,6 +122,8 @@ Examples:
     # TransE and RotatE margin
     parser.add_argument('--margin', type=float, default=12.0,
                        help='TransE/RotatE: Margin for scoring (default: 12.0)')
+    parser.add_argument('--fuzzy_temperature', type=float, default=1.0,
+                       help='TransEFuzzy: temperature for distance membership calibration (default: 1.0)')
     
     # Features paths
     parser.add_argument('--visual_features_path', type=str, default='vlkge/data/wn9_img/features/wn9_img_vf_clip.pkl',
@@ -240,6 +243,17 @@ Examples:
         raise ValueError("--use_textual is enabled but --textual_features_path is missing.")
     if args.use_relation_features and args.relation_features_path is None:
         raise ValueError("--use_relation_features is enabled but --relation_features_path is missing.")
+    if args.model == 'TransEFuzzy':
+        if not (args.use_structural and args.use_visual and args.use_textual):
+            raise ValueError(
+                "TransEFuzzy requires --use_structural, --use_visual, and --use_textual."
+            )
+        if args.fusion_mode == 'concat':
+            raise ValueError("TransEFuzzy does not support --fusion_mode concat.")
+        if not math.isfinite(args.fuzzy_temperature) or args.fuzzy_temperature <= 0:
+            raise ValueError(
+                "--fuzzy_temperature must be finite and greater than zero."
+            )
 
     # --- Expand & validate paths ---
     args.data_path = utils.validate_path(utils.expand_path(args.data_path), "Dataset CSV")
@@ -278,6 +292,8 @@ def main():
     print(f"  Structural: {args.use_structural}")
     print(f"  Visual: {args.use_visual}")
     print(f"  Textual: {args.use_textual}")
+    if args.model == 'TransEFuzzy':
+        print(f"  Fuzzy temperature: {args.fuzzy_temperature}")
     print(f"  Relation: {args.use_relation_features}")
     print(f"Advanced Features:")
     print(f"  Visual projection adapter: {args.visual_proj}")
@@ -416,6 +432,7 @@ def main():
         p_norm=args.p_norm,
         normalize_relations=args.normalize_relations,
         margin=args.margin,
+        fuzzy_temperature=args.fuzzy_temperature,
         lr=args.lr,
         use_scheduler=args.use_scheduler,
         device=device

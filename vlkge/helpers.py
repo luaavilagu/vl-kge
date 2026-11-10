@@ -666,6 +666,7 @@ def get_model(model_name, num_entities, num_relations,
               p_norm=1,
               normalize_relations=True,
               margin=12.0,
+              fuzzy_temperature=1.0,
               lr=0.1, use_scheduler=False, device=torch.device('cpu')):
     """
     Initialize KGE model and optimizer.
@@ -702,6 +703,11 @@ def get_model(model_name, num_entities, num_relations,
         model_kwargs['p_norm'] = p_norm
         model_kwargs['normalize_relations'] = normalize_relations
         model_kwargs['raw_margin'] = margin
+    elif model_name == 'TransEFuzzy':
+        model_kwargs['p_norm'] = p_norm
+        model_kwargs['normalize_relations'] = normalize_relations
+        model_kwargs['raw_margin'] = margin
+        model_kwargs['fuzzy_temperature'] = fuzzy_temperature
     elif model_name == 'NeuralTransE':
         model_kwargs['p_norm'] = p_norm
         model_kwargs['normalize_relations'] = normalize_relations
@@ -921,12 +927,12 @@ def train(model, train_loader, val_loader, test_loader, sampled_train_loader,
                         'model_name': model.__class__.__name__,
                         'num_neg_samples': num_neg_samples,
                         'batch_size': batch_size,
+                        'training_config': checkpoint_config,
                     }
                     if model.__class__.__name__ == 'MASGATransE':
                         additional_info.update({
                             'entity_to_id': entity_to_id,
                             'relation_to_id': relation_to_id,
-                            'training_config': checkpoint_config,
                             'visual_entity_to_index': model.visual_entity_to_index,
                             'textual_entity_to_index': model.textual_entity_to_index,
                         })
