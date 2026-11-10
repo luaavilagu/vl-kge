@@ -1,0 +1,49 @@
+# TransEFuzzy + CLIP on WN9-IMG
+
+# Dataset
+dataset: wn9_img
+data_path: vlkge/data/wn9_img/wn9_img_triples.csv
+
+# Features
+visual_features_path: vlkge/data/wn9_img/features/wn9_img_vf_clip.pkl
+textual_features_path: vlkge/data/wn9_img/features/wn9_img_tf_clip.pkl
+normalize_visual: false
+normalize_textual: false
+
+# Model
+model: TransEFuzzy
+embedding_dim: 768
+fusion_mode: average
+use_structural: true
+use_visual: true
+use_textual: true
+freeze_visual: true
+freeze_textual: true
+
+# TransE-specific
+p_norm: 1
+normalize_relations: true
+margin: 12.0
+
+# Training
+epochs: 200
+batch_size: 64
+lr: 0.1
+num_neg_samples: 100
+use_scheduler: false
+patience: 50
+
+# Dataset options
+use_per_relation_candidates: false
+bidirectional_eval: true
+inductive: false
+modality_asymmetry: false
+
+# Evaluation
+top_k: [1, 3, 10]
+
+# System
+seed: 42
+# Membership calibration; smaller batches bound intermediate training memory.
+fuzzy_temperature: 1.0
+save_path: runs/wn9_img/transe_fuzzy_clip/seed42.pt

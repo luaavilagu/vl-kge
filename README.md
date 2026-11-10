@@ -229,3 +229,55 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Questions or Issues?** Please contact the corresponding author or open an issue on our [GitHub repository](https://github.com/thefth/vl-kge/issues).
+
+## Fuzzy TransE experiment
+
+The fuzzy additions were imported from `xiomara5/vl-kge`, branch `fuzzy`,
+commit `9d1e22d083ce9528d7803a01c6b42eb25741d7fd`, and integrated with this
+repository's three-modality GA implementation. The training factory in
+`vlkge/helpers.py` retains the existing models and accepts `TransEFuzzy`.
+
+Run from the repository root:
+
+```bash
+python -m vlkge.scripts.train --config vlkge/configs/wn9_img/transe_fuzzy_clip.yaml
+```
+
+`TransEFuzzy` uses three modality distances, sigmoid calibration, and the
+27-rule Mamdani system during training. Rules are grouped into three output
+categories before evaluating the 201-point centroid grid, reducing retained
+grid storage by approximately nine times compared with the imported version.
+The score includes a continuous distance residual:
+
+`score = margin * (2 * fuzzy_centroid - 1) + mean((threshold_m - distance_m) / temperature)`
+
+L1 distances are divided by the square root of the embedding dimension.
+The residual preserves a training signal and distance differences when the
+linguistic memberships become flat. Consequently, scores are unbounded and
+are not probabilities. This changes the imported model's scoring formula;
+retrain checkpoints when comparing results. The logistic training loss is
+unchanged. This implements modality fusion, not inverse-relation constraints.
+
+The model currently requires structural, visual, and textual representations
+for every entity in a transductive setting. Use `fusion_mode: average` as the
+configuration placeholder; the model implements its own fuzzy fusion.
+Unsupported fusion modes, shared projection, and incomplete modalities are
+rejected rather than silently ignored. Frozen pretrained features remain
+frozen by default. `fuzzy_temperature` must be positive.
+
+The supplied configuration starts with batch size 64 and 100 negatives; peak
+memory still depends on feature dimensions and the device. For a fair baseline,
+use the same training settings with `--model TransE` and a different
+`--save_path`. All WN9-IMG training models now use separate head and tail
+filter maps. Recompute previous baselines before comparing their metrics.
+
+A separate post-hoc runner is available with
+`python -m vlkge.mas.run_fuzzy_transe --help`. It accepts standard `TransE`
+checkpoints and explicit calibration ranges; it does not retrain the model.
+Do not pass a `TransEFuzzy` checkpoint through that runner.
+
+Validation:
+
+```bash
+python -m unittest discover -s tests -v
+```

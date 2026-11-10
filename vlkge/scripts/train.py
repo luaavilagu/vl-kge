@@ -5,6 +5,7 @@ Supports: WN9-IMG, WikiArt-MKG-v1, WikiArt-MKG-v2
 
 import os
 import hashlib
+import math
 import argparse
 import sys
 import yaml
@@ -42,7 +43,7 @@ except ImportError:
         def __call__(self, parser, namespace, values, option_string=None):
             setattr(namespace, self.dest, not option_string.startswith('--no-'))
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='VL-KGE Training',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -76,7 +77,7 @@ Examples:
     
     # Model
     parser.add_argument('--model', type=str, default='TransE',
-                       choices=['TransE', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE', 'MASNeuralTransE', 'MASGATransE'],
+                       choices=['TransE', 'TransEFuzzy', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE', 'MASNeuralTransE', 'MASGATransE'],
                        help='KGE model (default: TransE)')
     parser.add_argument('--fusion_mode', type=str, default='average',
                        choices=['average', 'concat', 'weighted', 'addition'],
@@ -198,10 +199,11 @@ Examples:
     parser.add_argument('--downsample_fraction', type=float, default=1.0,
                        help='Fraction of relation to keep per epoch (default: 1.0)')
     
-    args = parser.parse_args()
+    parser.add_argument('--fuzzy_temperature', type=float, default=1.0,
+                        help='TransEFuzzy distance membership temperature (positive)')
     
     # -------- PASS 1: parse only to read --config --------
-    pre, _ = parser.parse_known_args()
+    pre, _ = parser.parse_known_args(argv)
 
     config = None
     if pre.config:
@@ -222,7 +224,7 @@ Examples:
         parser.set_defaults(**yaml_defaults)
 
     # -------- PASS 2: final parse (CLI > YAML > code defaults) --------
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # If you want to keep extra YAML fields (not in argparse), attach them:
     if config is not None:
@@ -252,6 +254,9 @@ Examples:
     if args.save_path:
         args.save_path = utils.expand_path(args.save_path)
 
+    if args.model == 'TransEFuzzy':
+        if not math.isfinite(args.fuzzy_temperature) or args.fuzzy_temperature <= 0:
+            raise ValueError('--fuzzy_temperature must be finite and positive.')
     args.cuda = (not args.no_cuda) and torch.cuda.is_available()
     return args
 
@@ -329,8 +334,8 @@ def main():
     print("\nBuilding evaluation mappings...")
     filter_map = data_loader.compute_filter_map()
     head_filter_map = None
-    if args.model == 'MASGATransE':
-        # Keep the same directional filtering in training and GA evaluation.
+    if args.dataset == 'wn9_img':
+        # Use separate head/tail filters for every WN9-IMG model comparison.
         from vlkge.ga.evaluation import directional_filters
         filter_map, head_filter_map = directional_filters(
             data_loader.data[['hid', 'rid', 'tid']].to_numpy()
@@ -361,10 +366,14 @@ def main():
 
     if exclude_from_sampled_train:
         sampled_train_data = train_data[~train_data['relation'].isin(exclude_from_sampled_train)]
-        sampled_train_data = sampled_train_data.sample(frac=sample_frac, random_state=args.seed)
+        sampled_train_data = sampled_train_data.sample(
+            n=min(len(sampled_train_data), max(1, round(len(sampled_train_data) * sample_frac))),
+            random_state=args.seed)
         print(f"Excluded {exclude_from_sampled_train} from sampled training evaluation")
     else:
-        sampled_train_data = train_data.sample(frac=sample_frac, random_state=args.seed)
+        sampled_train_data = train_data.sample(
+            n=min(len(train_data), max(1, round(len(train_data) * sample_frac))),
+            random_state=args.seed)
 
     sampled_train_dataset = KGDataset(sampled_train_data, entity_to_id, relation_to_id)
     sampled_train_loader = DataLoader(sampled_train_dataset, batch_size=args.batch_size, 
@@ -416,6 +425,7 @@ def main():
         p_norm=args.p_norm,
         normalize_relations=args.normalize_relations,
         margin=args.margin,
+        fuzzy_temperature=args.fuzzy_temperature,
         lr=args.lr,
         use_scheduler=args.use_scheduler,
         device=device
