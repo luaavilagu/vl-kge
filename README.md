@@ -53,6 +53,9 @@ pip install -e .
 # Using config file (recommended)
 python scripts/train.py --config configs/wn9_img/transe_clip.yaml
 
+# Train the separate TransEFuzzy model
+python scripts/train.py --config configs/wn9_img/transe_clip.yaml --model TransEFuzzy
+
 # Using command line arguments
 python scripts/train.py \
     --dataset wn9_img \
@@ -61,6 +64,44 @@ python scripts/train.py \
     --epochs 200 \
     --batch_size 512
 ```
+
+`TransEFuzzy` is a separate model; the original `TransE` implementation and
+its scoring behavior are unchanged. For each triple, `TransEFuzzy` computes
+structural, visual, and textual TransE distances, maps them to fuzzy evidence
+degrees, and applies the Mamdani rule base inside `forward()`. The resulting
+signed score is used by the regular training loss, so gradients update the
+TransE representations and learned modality distance thresholds. It requires
+all three modalities. `--fuzzy_temperature` controls the smooth distance
+calibration (default: `1.0`). This differs from the post-hoc fuzzy MAS
+aggregator, which does not participate in model training. Evaluate
+`TransEFuzzy` against `TransE` using the same validation/test protocol; a new
+model implementation does not guarantee better ranking metrics.
+
+The pretrained visual and textual feature tables remain frozen by default, as
+in the existing TransE setup. To fine-tune those embeddings too, explicitly
+pass `--no-freeze_visual --no-freeze_textual`. TransEFuzzy checkpoints should
+be evaluated using the `TransEFuzzy` class and not passed through the separate
+post-hoc fuzzy MAS aggregator.
+
+Mathematically, for each modality \(m\in\{s,v,t\}\), it computes
+\(d_m=\|\operatorname{norm}(h_m)+r-\operatorname{norm}(t_m)\|_p\), then maps
+distance to a higher-is-better evidence degree
+\(e_m=\sigma((\tau_m-d_m)/T)\). Here \(\tau_m\) is a learned distance threshold
+and \(T\) is `--fuzzy_temperature`. The implementation scales the L1 distance
+by \(\sqrt{d}\), where \(d\) is the embedding dimension, before calibration.
+
+Each \(e_m\in[0,1]\) receives low/medium/high memberships. Low is 1 up to 0.25
+and falls to 0 at 0.50; medium is triangular with peak 1 at 0.50 and zero at
+0.25 and 0.75; high rises from 0 at 0.50 to 1 at 0.75 and stays there. The 27
+rules use low=0, medium=0.5, high=1 and sum the three labels \(q\): \(q\leq
+0.75\) yields low, \(q\geq2.25\) yields high, and other cases yield medium.
+Mamdani inference uses minimum for AND, maximum to aggregate rule outputs, and
+a centroid on a 201-point grid to produce \(y\in[0,1]\). The signed ranking
+score returned to the existing logistic training loss is
+\(s=\text{margin}(2y-1)\). These piecewise min/max operations remain in the
+PyTorch computation graph; gradients update trainable entity and relation
+embeddings, trainable projection layers, and \(\tau_m\). The pretrained visual
+and textual feature tables remain frozen by default.
 
 ### Training on WikiArt-MKG-v2
 ```bash

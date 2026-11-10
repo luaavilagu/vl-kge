@@ -4,9 +4,11 @@ Supports: WN9-IMG, WikiArt-MKG-v1, WikiArt-MKG-v2
 """
 
 import os
+import hashlib
 import argparse
 import sys
 import yaml
+import math
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
@@ -41,7 +43,7 @@ except ImportError:
         def __call__(self, parser, namespace, values, option_string=None):
             setattr(namespace, self.dest, not option_string.startswith('--no-'))
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='VL-KGE Training',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -75,7 +77,7 @@ Examples:
     
     # Model
     parser.add_argument('--model', type=str, default='TransE',
-                       choices=['TransE', 'DistMult', 'ComplEx', 'RotatE'],
+                       choices=['TransE', 'TransEFuzzy', 'DistMult', 'ComplEx', 'RotatE', 'NeuralTransE', 'MASNeuralTransE', 'MASGATransE'],
                        help='KGE model (default: TransE)')
     parser.add_argument('--fusion_mode', type=str, default='average',
                        choices=['average', 'concat', 'weighted', 'addition'],
@@ -120,6 +122,8 @@ Examples:
     # TransE and RotatE margin
     parser.add_argument('--margin', type=float, default=12.0,
                        help='TransE/RotatE: Margin for scoring (default: 12.0)')
+    parser.add_argument('--fuzzy_temperature', type=float, default=1.0,
+                       help='TransEFuzzy: temperature for distance membership calibration (default: 1.0)')
     
     # Features paths
     parser.add_argument('--visual_features_path', type=str, default='vlkge/data/wn9_img/features/wn9_img_vf_clip.pkl',
@@ -170,6 +174,8 @@ Examples:
                        help='Disable CUDA (use CPU only)')
     parser.add_argument('--save_path', type=str, default=None,
                        help='Path to save best model checkpoint')
+    parser.add_argument('--skip_final_test', action='store_true',
+                       help='Reserve test evaluation for after fusion-weight selection')
     
     # Dataset-specific options
     parser.add_argument('--use_per_relation_candidates', action=BooleanOptionalAction, default=False,
@@ -195,10 +201,10 @@ Examples:
     parser.add_argument('--downsample_fraction', type=float, default=1.0,
                        help='Fraction of relation to keep per epoch (default: 1.0)')
     
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     # -------- PASS 1: parse only to read --config --------
-    pre, _ = parser.parse_known_args()
+    pre, _ = parser.parse_known_args(argv)
 
     config = None
     if pre.config:
@@ -219,7 +225,7 @@ Examples:
         parser.set_defaults(**yaml_defaults)
 
     # -------- PASS 2: final parse (CLI > YAML > code defaults) --------
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # If you want to keep extra YAML fields (not in argparse), attach them:
     if config is not None:
@@ -237,6 +243,17 @@ Examples:
         raise ValueError("--use_textual is enabled but --textual_features_path is missing.")
     if args.use_relation_features and args.relation_features_path is None:
         raise ValueError("--use_relation_features is enabled but --relation_features_path is missing.")
+    if args.model == 'TransEFuzzy':
+        if not (args.use_structural and args.use_visual and args.use_textual):
+            raise ValueError(
+                "TransEFuzzy requires --use_structural, --use_visual, and --use_textual."
+            )
+        if args.fusion_mode == 'concat':
+            raise ValueError("TransEFuzzy does not support --fusion_mode concat.")
+        if not math.isfinite(args.fuzzy_temperature) or args.fuzzy_temperature <= 0:
+            raise ValueError(
+                "--fuzzy_temperature must be finite and greater than zero."
+            )
 
     # --- Expand & validate paths ---
     args.data_path = utils.validate_path(utils.expand_path(args.data_path), "Dataset CSV")
@@ -255,6 +272,11 @@ Examples:
 
 def main():
     args = parse_args()
+
+    if args.model == 'MASGATransE':
+        # Persist dataset identity so GA scoring cannot silently use changed data.
+        with open(args.data_path, 'rb') as source:
+            args._data_sha256 = hashlib.sha256(source.read()).hexdigest()
     
     # Set seed
     utils.set_seed(args.seed)
@@ -270,6 +292,8 @@ def main():
     print(f"  Structural: {args.use_structural}")
     print(f"  Visual: {args.use_visual}")
     print(f"  Textual: {args.use_textual}")
+    if args.model == 'TransEFuzzy':
+        print(f"  Fuzzy temperature: {args.fuzzy_temperature}")
     print(f"  Relation: {args.use_relation_features}")
     print(f"Advanced Features:")
     print(f"  Visual projection adapter: {args.visual_proj}")
@@ -320,6 +344,13 @@ def main():
     # Compute filter map and relation probs
     print("\nBuilding evaluation mappings...")
     filter_map = data_loader.compute_filter_map()
+    head_filter_map = None
+    if args.model == 'MASGATransE':
+        # Keep the same directional filtering in training and GA evaluation.
+        from vlkge.ga.evaluation import directional_filters
+        filter_map, head_filter_map = directional_filters(
+            data_loader.data[['hid', 'rid', 'tid']].to_numpy()
+        )
     relation_probs = data_loader.compute_relation_probs()
     
     # Create DataLoaders
@@ -401,6 +432,7 @@ def main():
         p_norm=args.p_norm,
         normalize_relations=args.normalize_relations,
         margin=args.margin,
+        fuzzy_temperature=args.fuzzy_temperature,
         lr=args.lr,
         use_scheduler=args.use_scheduler,
         device=device
@@ -448,7 +480,10 @@ def main():
         generator=generator,
         evaluate_every=args.evaluate_every,
         patience=args.patience,
-        resume_from=args.resume_from
+        resume_from=args.resume_from,
+        checkpoint_config=vars(args),
+        head_filter_map=head_filter_map,
+        skip_final_test=args.skip_final_test,
     )
 
 

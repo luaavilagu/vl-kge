@@ -1,0 +1,43 @@
+# Stage 1: learn relation translations once with alpha fixed at its default 0.5.
+# Stage 2: run vlkge.ga.run_fusion_ga against the saved checkpoint.
+dataset: wn9_img
+data_path: vlkge/data/wn9_img/wn9_img_triples.csv
+visual_features_path: vlkge/data/wn9_img/features/wn9_img_vf_clip.pkl
+textual_features_path: vlkge/data/wn9_img/features/wn9_img_tf_clip.pkl
+normalize_visual: false
+normalize_textual: false
+normalize_relation: false
+
+model: MASGATransE
+embedding_dim: 768
+fusion_mode: average
+use_structural: false
+use_visual: true
+use_textual: true
+use_relation_features: false
+freeze_visual: true
+freeze_textual: true
+visual_proj: false
+textual_proj: false
+shared_projection: []
+normalize_before_fusion: false
+inductive: false
+modality_asymmetry: false
+p_norm: 1
+normalize_relations: true
+margin: 12.0
+
+epochs: 200
+batch_size: 512
+lr: 0.1
+num_neg_samples: 100
+use_scheduler: false
+use_bernoulli: false
+patience: 50
+evaluate_every: 1
+use_per_relation_candidates: false
+bidirectional_eval: true
+top_k: [1, 3, 10]
+seed: 42
+save_path: runs/wn9_img/mas_gatranse_multimodal/seed42.pt
+skip_final_test: true

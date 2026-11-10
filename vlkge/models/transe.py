@@ -1,6 +1,7 @@
 """
 TransE model inheriting from VLKGEBase
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,7 +62,7 @@ class TransE(VLKGEBase):
         self.normalize_relations = normalize_relations
         self.p_norm = p_norm
         self.raw_margin = nn.Parameter(torch.tensor(raw_margin), requires_grad=False)
-        
+
         # Use final embedding_dim (which includes concat adjustment if needed)
         final_dim = self.embedding_dim
         
